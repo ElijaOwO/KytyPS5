@@ -1125,7 +1125,7 @@ void TestAddressIndirectImageAnalysis() {
   Check(shifted.has_value() && shifted->conditional_key_range.minimum == 1u &&
             shifted->conditional_key_range.maximum == 7u &&
             shifted->descriptor_stride == 32u &&
-            shifted->candidate_count == 8u &&
+            shifted->candidate_count == 7u &&
             !shifted->requires_nonempty_wave_mask,
         "clamped waterfall address image lost its guarded 1..7 key domain");
 
@@ -1181,6 +1181,73 @@ void TestAddressIndirectImageAnalysis() {
                      fixture.program.memory_info[index].planning_only;
             }),
         "address-array descriptor loads were not marked planning-only");
+
+  const auto resource_plan = ExtractResourcePlan(fixture.program);
+  std::array<uint32_t, 7> user_data{};
+  user_data[3] = 0x2000u;
+
+  LinearTestMemory memory;
+  std::array<uint32_t, 8> descriptor_a{};
+  descriptor_a[0] = 0x4000u;
+  descriptor_a[1] =
+      static_cast<uint32_t>(
+          Libs::Graphics::Prospero::BufferFormat::k32_32_32_32Float)
+      << 20u;
+  descriptor_a[2] = 3u | (3u << 14u);
+  descriptor_a[3] =
+      Libs::Graphics::DstSel(4, 5, 6, 7) |
+      (static_cast<uint32_t>(Libs::Graphics::Prospero::ImageType::kColor2D)
+       << 28u);
+  auto descriptor_b = descriptor_a;
+  descriptor_b[0] = 0x5000u;
+
+  for (uint32_t key = 0; key < 8u; key++) {
+    const auto &descriptor = (key & 1u) == 0u ? descriptor_a : descriptor_b;
+    const auto start =
+        (0x2000u - memory.base) / sizeof(uint32_t) + key * 8u;
+    for (uint32_t dword = 0; dword < descriptor.size(); dword++) {
+      memory.words[start + dword] = descriptor[dword];
+    }
+  }
+
+  const SrtRuntime runtime{
+      .user_data = user_data,
+      .userdata = &memory,
+      .read_specialization_memory = ReadLinearTestMemory,
+  };
+  ResourceSnapshot snapshot;
+  ResourceSpecialization specialization;
+  Check(MaterializeResources(resource_plan, runtime, snapshot, specialization),
+        "address-array candidates did not materialize");
+  Check(snapshot.images.size() == 2u && specialization.images.size() == 2u &&
+            specialization.images[0].indirect_root == 0u,
+        "address-array candidates did not expand into dense image resources");
+
+  const auto mapping = specialization.images[0].indirect_mapping_offset;
+  Check(mapping < snapshot.flattened_srt.size() &&
+            snapshot.flattened_srt[mapping] == 8u &&
+            specialization.images[0].indirect_search_iterations == 4u,
+        "address-array runtime key mapping has the wrong size");
+  for (uint32_t key = 0; key < 8u; key++) {
+    const auto entry = mapping + 1u + key * 2u;
+    Check(entry + 1u < snapshot.flattened_srt.size() &&
+              snapshot.flattened_srt[entry] == key &&
+              snapshot.flattened_srt[entry + 1u] == (key & 1u),
+          "address-array key did not map to the expected deduplicated candidate");
+  }
+  Check(std::equal(descriptor_a.begin(), descriptor_a.end(),
+                   snapshot.images[0].dwords.begin()) &&
+            std::equal(descriptor_b.begin(), descriptor_b.end(),
+                       snapshot.images[1].dwords.begin()),
+        "address-array descriptor payloads were not preserved");
+
+  const auto stable_snapshot = snapshot;
+  const auto stable_specialization = specialization;
+  memory.fail_address = 0x2060u;
+  Check(!MaterializeResources(resource_plan, runtime, snapshot, specialization) &&
+            SameResourceSnapshot(snapshot, stable_snapshot) &&
+            specialization == stable_specialization,
+        "failed address-array read mutated materialization outputs");
 }
 
 void TestImagesSamplersAndAliases() {
