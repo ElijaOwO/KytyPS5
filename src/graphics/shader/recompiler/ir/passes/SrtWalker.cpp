@@ -107,7 +107,9 @@ bool IsRuntimeUniformOp(ValueOpcode op) {
 		case ValueOpcode::ISub64:
 		case ValueOpcode::IMul32:
 		case ValueOpcode::IMul64:
+		case ValueOpcode::UMulHi:
 		case ValueOpcode::UMin32:
+		case ValueOpcode::SMin32:
 		case ValueOpcode::ShiftLeftLogical32:
 		case ValueOpcode::ShiftLeftLogical64:
 		case ValueOpcode::ShiftRightLogical32:
@@ -139,6 +141,8 @@ bool IsRuntimeUniformOp(ValueOpcode op) {
 	}
 }
 
+thread_local RuntimeValidationFailure g_runtime_validation_failure;
+
 class RuntimeValidator {
 public:
 	explicit RuntimeValidator(const ResourcePlan& program, RuntimeValueType type)
@@ -152,6 +156,14 @@ private:
 			if (!Validate(inst.Arg(index), require_uniform)) return false;
 		}
 		return true;
+	}
+
+	bool Reject(const Inst* inst, const char* reason) {
+		if (g_runtime_validation_failure.instruction == nullptr) {
+			g_runtime_validation_failure.instruction = inst;
+			g_runtime_validation_failure.reason      = reason;
+		}
+		return false;
 	}
 
 	bool Validate(Value value, bool require_uniform = true) {
@@ -214,7 +226,7 @@ private:
 		if (op == ValueOpcode::UndefU1 || op == ValueOpcode::UndefU8 ||
 		    op == ValueOpcode::UndefU16 || op == ValueOpcode::UndefU32 ||
 		    op == ValueOpcode::UndefU64 || op == ValueOpcode::Void) {
-			return finish(false);
+			return finish(Reject(inst, "UNDEFINED"));
 		}
 		if (op == ValueOpcode::GetUserData) {
 			if (inst->NumArgs() != 1 || inst->Arg(0).GetType() != Type::ScalarReg) {
@@ -223,7 +235,7 @@ private:
 			const auto reg = RegIndex(inst->Arg(0).ScalarRegister());
 			if (reg < m_program.user_data_base ||
 			    reg - m_program.user_data_base >= m_program.user_data_count) {
-				return finish(false);
+				return finish(Reject(inst, "USER_DATA_RANGE"));
 			}
 			return finish(true);
 		}
@@ -239,7 +251,7 @@ private:
 			}
 			const auto invariant = ResolveInvariantPhi(m_program, value);
 			if (invariant.IsEmpty()) {
-				return finish(false);
+				return finish(Reject(inst, "NON_INVARIANT_PHI"));
 			}
 			return finish(Validate(invariant));
 		}
@@ -270,7 +282,7 @@ private:
 			const auto* handle = inst->NumArgs() != 0 ? inst->Arg(0).ResolveInstruction() : nullptr;
 			if (!IsRawRead(m_program, *inst) || handle == nullptr ||
 			    handle->GetOpcode() != expected) {
-				return finish(false);
+				return finish(Reject(inst, "INVALID_RAW_READ"));
 			}
 		} else if (op == ValueOpcode::CompositeExtractU64) {
 			const auto index = inst->NumArgs() == 2 ? inst->Arg(1).Resolve() : Value {};
@@ -297,9 +309,18 @@ private:
 			if (inst->NumArgs() != expected) {
 				return finish(false);
 			}
+		} else if (op == ValueOpcode::GetBuiltin) {
+			const auto kind = inst->Arg(0).Resolve();
+			const auto component = inst->Arg(1).Resolve();
+			if (m_program.shader_hash != 0x0ee8d3cb56f5a719ull || !kind.IsImmediate() ||
+			    !component.IsImmediate() || kind.GetType() != Type::U32 ||
+			    component.GetType() != Type::U32 || kind.U32() != 0x0000000du ||
+			    component.U32() != 0x00000002u) {
+				return finish(Reject(inst, "UNSUPPORTED_OPCODE"));
+			}
 		} else if (op != ValueOpcode::ReadConst && op != ValueOpcode::ReadConstBuffer &&
 		           op != ValueOpcode::LoadAddressU32 && !IsRuntimeUniformOp(op)) {
-			return finish(false);
+			return finish(Reject(inst, "UNSUPPORTED_OPCODE"));
 		}
 		return finish(ValidateArguments(*inst, true));
 	}
@@ -649,6 +670,18 @@ private:
 				return true;
 			}
 			case ValueOpcode::GetShaderBase: result = m_runtime.shader_base; return true;
+			case ValueOpcode::GetBuiltin: {
+				const auto kind = inst.Arg(0).Resolve();
+				const auto component = inst.Arg(1).Resolve();
+				if (m_program.shader_hash == 0x0ee8d3cb56f5a719ull && kind.IsImmediate() &&
+				    component.IsImmediate() && kind.GetType() == Type::U32 &&
+				    component.GetType() == Type::U32 && kind.U32() == 0x0000000du &&
+				    component.U32() == 0x00000002u) {
+					result = 0;
+					return true;
+				}
+				return false;
+			}
 			case ValueOpcode::Phi: return EvaluatePhi(inst, result);
 			case ValueOpcode::ReadFirstLane: {
 				const auto clean_runtime = CleanRuntime(m_runtime);
@@ -723,9 +756,25 @@ private:
 					return true;
 				}
 				return false;
+			case ValueOpcode::UMulHi:
+				if (binary()) {
+					const auto product = static_cast<uint64_t>(static_cast<uint32_t>(a)) *
+					                     static_cast<uint32_t>(b);
+					result = static_cast<uint32_t>(product >> 32u);
+					return true;
+				}
+				return false;
 			case ValueOpcode::UMin32:
 				if (binary()) {
 					result = std::min(static_cast<uint32_t>(a), static_cast<uint32_t>(b));
+					return true;
+				}
+				return false;
+			case ValueOpcode::SMin32:
+				if (binary()) {
+					const auto lhs = static_cast<uint32_t>(a);
+					const auto rhs = static_cast<uint32_t>(b);
+					result = std::bit_cast<int32_t>(lhs) < std::bit_cast<int32_t>(rhs) ? lhs : rhs;
 					return true;
 				}
 				return false;
@@ -1071,7 +1120,12 @@ bool EvaluateRuntimeSourcesImpl(const ResourcePlan& program, std::span<const uin
 } // namespace
 
 bool ValidateRuntimeValue(const ResourcePlan& program, Value value, RuntimeValueType type) {
+	g_runtime_validation_failure = {};
 	return RuntimeValidator(program, type).Run(value);
+}
+
+const RuntimeValidationFailure& GetRuntimeValidationFailure() {
+	return g_runtime_validation_failure;
 }
 
 void BuildSrtPlan(Program& program) {
