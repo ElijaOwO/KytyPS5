@@ -2,6 +2,7 @@
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "graphics/shader/recompiler/ir/passes/BindingLayout.h"
 #include "graphics/shader/recompiler/ir/passes/DeadCodeElimination.h"
+#include "graphics/shader/recompiler/ir/passes/ResourceKeyAnalysis.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceTracking.h"
 #include "graphics/shader/recompiler/ir/passes/ShaderInfoCollection.h"
@@ -708,6 +709,121 @@ void TestRuntimeUnsignedMultiplyHighDescriptor() {
   Check(EvaluateDescriptorSource(fixture.program, source, runtime, value) &&
             value.dwords[3] == 2u,
         "runtime descriptor unsigned multiply-high did not reevaluate runtime input");
+}
+
+void TestBoundedResourceKeyAnalysis() {
+  Fixture fixture;
+
+  const auto base = fixture.Emit(
+      ValueOpcode::INotEqual32, {fixture.UserData(0), Value(0u)});
+  const auto guard1 = fixture.Emit(
+      ValueOpcode::INotEqual32, {fixture.UserData(1), Value(0u)});
+  const auto guard2 = fixture.Emit(
+      ValueOpcode::INotEqual32, {fixture.UserData(2), Value(0u)});
+  const auto active_left =
+      fixture.Emit(ValueOpcode::LogicalAnd, {base, guard1});
+  const auto active =
+      fixture.Emit(ValueOpcode::LogicalAnd, {active_left, guard2});
+
+  const auto raw_float =
+      fixture.Emit(ValueOpcode::BitCastF32U32, {fixture.UserData(3)});
+  const auto saturated =
+      fixture.Emit(ValueOpcode::FPSaturate32, {raw_float});
+  const auto saturated_bits =
+      fixture.Emit(ValueOpcode::BitCastU32F32, {saturated});
+  const auto selected_saturated = fixture.Emit(
+      ValueOpcode::SelectU32,
+      {base, saturated_bits, fixture.UserData(4)});
+  const auto selected_saturated_float =
+      fixture.Emit(ValueOpcode::BitCastF32U32, {selected_saturated});
+
+  const auto scaled = fixture.Emit(
+      ValueOpcode::FPFma32,
+      {Value::F32(-7.0f), selected_saturated_float, Value::F32(7.0f)});
+  const auto scaled_bits =
+      fixture.Emit(ValueOpcode::BitCastU32F32, {scaled});
+  const auto selected_scaled = fixture.Emit(
+      ValueOpcode::SelectU32,
+      {base, scaled_bits, fixture.UserData(5)});
+  const auto selected_scaled_float =
+      fixture.Emit(ValueOpcode::BitCastF32U32, {selected_scaled});
+  const auto floored =
+      fixture.Emit(ValueOpcode::FPFloor32, {selected_scaled_float});
+
+  const auto is_nan =
+      fixture.Emit(ValueOpcode::FPIsNan32, {floored});
+  const auto below_min = fixture.Emit(
+      ValueOpcode::FPOrdLessThanEqual32,
+      {floored, Value::F32(-2147483648.0f)});
+  const auto above_max = fixture.Emit(
+      ValueOpcode::FPOrdGreaterThanEqual32,
+      {floored, Value::F32(2147483648.0f)});
+  const auto truncated =
+      fixture.Emit(ValueOpcode::FPTrunc32, {floored});
+  const auto low_clamped = fixture.Emit(
+      ValueOpcode::SelectF32,
+      {below_min, Value::F32(-2147483648.0f), truncated});
+  const auto high_clamped = fixture.Emit(
+      ValueOpcode::SelectF32,
+      {above_max, Value::F32(2147483520.0f), low_clamped});
+  const auto nan_clamped = fixture.Emit(
+      ValueOpcode::SelectF32, {is_nan, Value::F32(0.0f), high_clamped});
+  const auto converted =
+      fixture.Emit(ValueOpcode::ConvertS32F32, {nan_clamped});
+  const auto high_selected = fixture.Emit(
+      ValueOpcode::SelectU32,
+      {above_max, Value(0x7fffffffu), converted});
+  const auto low_selected = fixture.Emit(
+      ValueOpcode::SelectU32,
+      {below_min, Value(0x80000000u), high_selected});
+  const auto index = fixture.Emit(
+      ValueOpcode::SelectU32, {is_nan, Value(0u), low_selected});
+
+  const auto wave_source = fixture.Emit(
+      ValueOpcode::SelectU32, {active, index, fixture.UserData(6)});
+  const auto lane = fixture.Emit(
+      ValueOpcode::ReadLane,
+      {wave_source, fixture.Emit(ValueOpcode::LaneId)});
+  const auto raw_offset = fixture.Emit(
+      ValueOpcode::ShiftLeftLogical32, {lane, Value(5u)});
+  const auto incremented =
+      fixture.Emit(ValueOpcode::IAdd32, {lane, Value(1u)});
+  const auto clamped =
+      fixture.Emit(ValueOpcode::SMin32, {incremented, Value(7u)});
+  const auto clamped_offset = fixture.Emit(
+      ValueOpcode::ShiftLeftLogical32, {clamped, Value(5u)});
+
+  const auto unsafe =
+      AnalyzeResourceKeyRange(lane, {.condition = active});
+  Check(!unsafe.has_value(),
+        "ReadLane inherited a lane condition without wave provenance");
+
+  const ResourceKeyRangeContext proven{
+      .condition = active,
+      .selected_lane_satisfies_condition = true,
+  };
+  const auto lane_range = AnalyzeResourceKeyRange(lane, proven);
+  Check(lane_range.has_value() && lane_range->minimum == 0u &&
+            lane_range->maximum == 7u,
+        "bounded ReadLane key did not retain the 0..7 domain");
+
+  const auto clamped_range = AnalyzeResourceKeyRange(clamped, proven);
+  Check(clamped_range.has_value() && clamped_range->minimum == 1u &&
+            clamped_range->maximum == 7u,
+        "signed minimum did not preserve the bounded incremented key");
+
+  const auto raw_offset_range =
+      AnalyzeResourceKeyRange(raw_offset, proven);
+  Check(raw_offset_range.has_value() && raw_offset_range->minimum == 0u &&
+            raw_offset_range->maximum == 224u,
+        "raw bounded key did not produce the expected 32-byte offset range");
+
+  const auto clamped_offset_range =
+      AnalyzeResourceKeyRange(clamped_offset, proven);
+  Check(clamped_offset_range.has_value() &&
+            clamped_offset_range->minimum == 32u &&
+            clamped_offset_range->maximum == 224u,
+        "clamped bounded key did not produce the expected 32-byte offset range");
 }
 
 void TestImagesSamplersAndAliases() {
@@ -2039,6 +2155,7 @@ int main() {
     Run("scalar/vector alias", TestScalarAndVectorBufferAlias);
     Run("runtime unsigned min", TestRuntimeUnsignedMinDescriptor);
     Run("runtime unsigned multiply high", TestRuntimeUnsignedMultiplyHighDescriptor);
+    Run("bounded resource key analysis", TestBoundedResourceKeyAnalysis);
     Run("images and samplers", TestImagesSamplersAndAliases);
     Run("SampleAdjust sampler scratch", TestSampleAdjustSamplerScratch);
     Run("FMASK load specialization", TestFmaskLoadSpecialization);
