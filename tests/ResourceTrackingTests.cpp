@@ -956,10 +956,21 @@ void TestWaterfallReadLaneProvenance() {
 }
 
 void TestAddressIndirectImageAnalysis() {
+  namespace CFG = Libs::Graphics::ShaderRecompiler::CFG;
+
   Fixture fixture;
   auto *entry = fixture.block;
   auto *header = fixture.AddBlock();
+  auto *body = fixture.AddBlock();
   auto *latch = fixture.AddBlock();
+  auto *done = fixture.AddBlock();
+
+  entry->AddBranch(header);
+  header->AddBranch(body);
+  header->AddBranch(latch);
+  body->AddBranch(latch);
+  latch->AddBranch(header);
+  latch->AddBranch(done);
 
   const auto guard = fixture.Emit(
       ValueOpcode::INotEqual32, {fixture.UserData(0), Value(0u)}, 0, entry);
@@ -972,33 +983,15 @@ void TestAddressIndirectImageAnalysis() {
   const auto high_initial = fixture.Emit(
       ValueOpcode::CompositeExtractU32x4, {ballot, Value(1u)}, 0, entry);
 
+  auto &active_phi = header->AppendNewInst(ValueOpcode::Phi);
+  active_phi.SetFlags(Type::U1);
   auto &low_phi = header->AppendNewInst(ValueOpcode::Phi);
   low_phi.SetFlags(Type::U32);
   auto &high_phi = header->AppendNewInst(ValueOpcode::Phi);
   high_phi.SetFlags(Type::U32);
 
-  const auto clear_ballot =
-      fixture.Emit(ValueOpcode::Ballot, {Value(true)}, 0, latch);
-  const auto clear_low = fixture.Emit(
-      ValueOpcode::CompositeExtractU32x4,
-      {clear_ballot, Value(0u)}, 0, latch);
-  const auto clear_high = fixture.Emit(
-      ValueOpcode::CompositeExtractU32x4,
-      {clear_ballot, Value(1u)}, 0, latch);
-  const auto next_low = fixture.Emit(
-      ValueOpcode::BitwiseAnd32,
-      {Value(&low_phi),
-       fixture.Emit(ValueOpcode::BitwiseNot32, {clear_low}, 0, latch)},
-      0, latch);
-  const auto next_high = fixture.Emit(
-      ValueOpcode::BitwiseAnd32,
-      {Value(&high_phi),
-       fixture.Emit(ValueOpcode::BitwiseNot32, {clear_high}, 0, latch)},
-      0, latch);
-  low_phi.AddPhiOperand(entry, low_initial);
-  low_phi.AddPhiOperand(latch, next_low);
-  high_phi.AddPhiOperand(entry, high_initial);
-  high_phi.AddPhiOperand(latch, next_high);
+  active_phi.AddPhiOperand(entry, active);
+  active_phi.AddPhiOperand(latch, Value(&active_phi));
 
   const auto low_nonzero = fixture.Emit(
       ValueOpcode::INotEqual32, {Value(&low_phi), Value(0u)}, 0, header);
@@ -1031,13 +1024,63 @@ void TestAddressIndirectImageAnalysis() {
   const auto read_lane = fixture.Emit(
       ValueOpcode::ReadLane, {bounded_source, masked_lane}, 0, header);
 
-  const auto address =
-      fixture.Address(fixture.UserData(3), fixture.UserData(4), 0xd60);
+  const auto matches =
+      fixture.Emit(ValueOpcode::IEqual32, {read_lane, bounded_source}, 0, header);
+  const auto use_guard = fixture.Emit(
+      ValueOpcode::LogicalAnd, {Value(&active_phi), matches}, 0, header);
+  const auto matched_ballot =
+      fixture.Emit(ValueOpcode::Ballot, {use_guard}, 0, header);
+  const auto matched_low = fixture.Emit(
+      ValueOpcode::CompositeExtractU32x4,
+      {matched_ballot, Value(0u)}, 0, header);
+  const auto matched_high = fixture.Emit(
+      ValueOpcode::CompositeExtractU32x4,
+      {matched_ballot, Value(1u)}, 0, header);
+
+  const auto next_low = fixture.Emit(
+      ValueOpcode::BitwiseAnd32,
+      {Value(&low_phi),
+       fixture.Emit(ValueOpcode::BitwiseNot32, {matched_low}, 0, latch)},
+      0, latch);
+  const auto next_high = fixture.Emit(
+      ValueOpcode::BitwiseAnd32,
+      {Value(&high_phi),
+       fixture.Emit(ValueOpcode::BitwiseNot32, {matched_high}, 0, latch)},
+      0, latch);
+  low_phi.AddPhiOperand(entry, low_initial);
+  low_phi.AddPhiOperand(latch, next_low);
+  high_phi.AddPhiOperand(entry, high_initial);
+  high_phi.AddPhiOperand(latch, next_high);
+
+  const auto remaining = fixture.Emit(
+      ValueOpcode::INotEqual32,
+      {fixture.Emit(ValueOpcode::BitwiseOr32, {next_low, next_high}, 0, latch),
+       Value(0u)},
+      0, latch);
+
+  fixture.program.block_info[0].terminator = {
+      .kind = CFG::TerminatorKind::Branch, .true_block = 1u};
+  fixture.program.block_info[1].condition = use_guard;
+  fixture.program.block_info[1].terminator = {
+      .kind = CFG::TerminatorKind::ConditionalBranch,
+      .true_block = 2u, .false_block = 3u};
+  fixture.program.block_info[2].terminator = {
+      .kind = CFG::TerminatorKind::Branch, .true_block = 3u};
+  fixture.program.block_info[3].condition = remaining;
+  fixture.program.block_info[3].terminator = {
+      .kind = CFG::TerminatorKind::ConditionalBranch,
+      .true_block = 1u, .false_block = 4u};
+  fixture.program.block_info[4].terminator.kind =
+      CFG::TerminatorKind::Return;
+
+  const auto address = fixture.Emit(
+      ValueOpcode::GetAddressResource,
+      {fixture.UserData(3), fixture.UserData(4)}, MemoryFlags{0, 0xd60}, body);
 
   const auto MakeAddressImage =
       [&](Value key, uint32_t pc, bool malformed) {
         const auto offset = fixture.Emit(
-            ValueOpcode::ShiftLeftLogical32, {key, Value(5u)}, 0, header);
+            ValueOpcode::ShiftLeftLogical32, {key, Value(5u)}, 0, body);
         std::array<Value, 8> words;
         for (uint32_t dword = 0; dword < words.size(); dword++) {
           MemoryInfo memory;
@@ -1049,9 +1092,13 @@ void TestAddressIndirectImageAnalysis() {
           words[dword] = fixture.Emit(
               ValueOpcode::LoadAddressU32,
               {address, offset, Value(0u), Value(true)},
-              fixture.AddMemory(memory, pc), header);
+              fixture.AddMemory(memory, pc), body);
         }
-        return fixture.Image(words, pc);
+        return fixture.Emit(
+            ValueOpcode::GetImageResource,
+            {words[0], words[1], words[2], words[3],
+             words[4], words[5], words[6], words[7]},
+            MemoryFlags{0, pc}, body);
       };
 
   const auto raw_image = MakeAddressImage(read_lane, 0xd94, false);
@@ -1061,8 +1108,8 @@ void TestAddressIndirectImageAnalysis() {
             raw->conditional_key_range.maximum == 7u &&
             raw->descriptor_stride == 32u && raw->candidate_count == 8u &&
             raw->address_handle == address.ResolveInstruction() &&
-            raw->requires_nonempty_wave_mask,
-        "raw waterfall address image was not recognized as an 8-entry array");
+            !raw->requires_nonempty_wave_mask,
+        "raw waterfall address image did not close the empty-mask fallback");
 
   const auto incremented =
       fixture.Emit(ValueOpcode::IAdd32, {read_lane, Value(1u)}, 0, header);
@@ -1074,8 +1121,17 @@ void TestAddressIndirectImageAnalysis() {
   Check(shifted.has_value() && shifted->conditional_key_range.minimum == 1u &&
             shifted->conditional_key_range.maximum == 7u &&
             shifted->descriptor_stride == 32u &&
-            shifted->candidate_count == 8u,
-        "clamped waterfall address image lost its 1..7 bounded key domain");
+            shifted->candidate_count == 8u &&
+            !shifted->requires_nonempty_wave_mask,
+        "clamped waterfall address image lost its guarded 1..7 key domain");
+
+  const auto saved_backedge_condition = fixture.program.block_info[3].condition;
+  fixture.program.block_info[3].condition = Value(true);
+  Check(!AnalyzeAddressIndirectImage(
+             fixture.program, *raw_image.ResolveInstruction())
+             .has_value(),
+        "address image analysis accepted an unguarded empty-mask backedge");
+  fixture.program.block_info[3].condition = saved_backedge_condition;
 
   const auto malformed_image = MakeAddressImage(read_lane, 0xd9c, true);
   Check(!AnalyzeAddressIndirectImage(
