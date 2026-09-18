@@ -2,6 +2,7 @@
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "graphics/shader/recompiler/ir/passes/BindingLayout.h"
 #include "graphics/shader/recompiler/ir/passes/DeadCodeElimination.h"
+#include "graphics/shader/recompiler/ir/passes/ResourceAddressAnalysis.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceKeyAnalysis.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceTracking.h"
@@ -952,6 +953,135 @@ void TestWaterfallReadLaneProvenance() {
       ValueOpcode::ReadLane, {bounded, bad_masked_lane}, 0, bad_header);
   Check(!AnalyzeWaterfallReadLane(fixture.program, bad_read).has_value(),
         "waterfall provenance accepted a mask recurrence that can add lanes");
+}
+
+void TestAddressIndirectImageAnalysis() {
+  Fixture fixture;
+  auto *entry = fixture.block;
+  auto *header = fixture.AddBlock();
+  auto *latch = fixture.AddBlock();
+
+  const auto guard = fixture.Emit(
+      ValueOpcode::INotEqual32, {fixture.UserData(0), Value(0u)}, 0, entry);
+  const auto active =
+      fixture.Emit(ValueOpcode::LogicalAnd, {guard, Value(true)}, 0, entry);
+  const auto ballot =
+      fixture.Emit(ValueOpcode::Ballot, {active}, 0, entry);
+  const auto low_initial = fixture.Emit(
+      ValueOpcode::CompositeExtractU32x4, {ballot, Value(0u)}, 0, entry);
+  const auto high_initial = fixture.Emit(
+      ValueOpcode::CompositeExtractU32x4, {ballot, Value(1u)}, 0, entry);
+
+  auto &low_phi = header->AppendNewInst(ValueOpcode::Phi);
+  low_phi.SetFlags(Type::U32);
+  auto &high_phi = header->AppendNewInst(ValueOpcode::Phi);
+  high_phi.SetFlags(Type::U32);
+
+  const auto clear_ballot =
+      fixture.Emit(ValueOpcode::Ballot, {Value(true)}, 0, latch);
+  const auto clear_low = fixture.Emit(
+      ValueOpcode::CompositeExtractU32x4,
+      {clear_ballot, Value(0u)}, 0, latch);
+  const auto clear_high = fixture.Emit(
+      ValueOpcode::CompositeExtractU32x4,
+      {clear_ballot, Value(1u)}, 0, latch);
+  const auto next_low = fixture.Emit(
+      ValueOpcode::BitwiseAnd32,
+      {Value(&low_phi),
+       fixture.Emit(ValueOpcode::BitwiseNot32, {clear_low}, 0, latch)},
+      0, latch);
+  const auto next_high = fixture.Emit(
+      ValueOpcode::BitwiseAnd32,
+      {Value(&high_phi),
+       fixture.Emit(ValueOpcode::BitwiseNot32, {clear_high}, 0, latch)},
+      0, latch);
+  low_phi.AddPhiOperand(entry, low_initial);
+  low_phi.AddPhiOperand(latch, next_low);
+  high_phi.AddPhiOperand(entry, high_initial);
+  high_phi.AddPhiOperand(latch, next_high);
+
+  const auto low_nonzero = fixture.Emit(
+      ValueOpcode::INotEqual32, {Value(&low_phi), Value(0u)}, 0, header);
+  const auto high_nonzero = fixture.Emit(
+      ValueOpcode::INotEqual32, {Value(&high_phi), Value(0u)}, 0, header);
+  const auto low_lane = fixture.Emit(
+      ValueOpcode::FindILsb32, {Value(&low_phi)}, 0, header);
+  const auto high_lane = fixture.Emit(
+      ValueOpcode::IAdd32,
+      {fixture.Emit(ValueOpcode::FindILsb32, {Value(&high_phi)}, 0, header),
+       Value(32u)},
+      0, header);
+  const auto selected_lane = fixture.Emit(
+      ValueOpcode::SelectU32,
+      {low_nonzero, low_lane,
+       fixture.Emit(ValueOpcode::SelectU32,
+                    {high_nonzero, high_lane, Value(0xffffffffu)}, 0, header)},
+      0, header);
+  const auto masked_lane = fixture.Emit(
+      ValueOpcode::BitwiseAnd32, {selected_lane, Value(0x3fu)}, 0, header);
+
+  const auto choose_endpoint = fixture.Emit(
+      ValueOpcode::INotEqual32, {fixture.UserData(1), Value(0u)}, 0, entry);
+  const auto bounded_active = fixture.Emit(
+      ValueOpcode::SelectU32, {choose_endpoint, Value(0u), Value(7u)}, 0,
+      entry);
+  const auto bounded_source = fixture.Emit(
+      ValueOpcode::SelectU32,
+      {active, bounded_active, fixture.UserData(2)}, 0, entry);
+  const auto read_lane = fixture.Emit(
+      ValueOpcode::ReadLane, {bounded_source, masked_lane}, 0, header);
+
+  const auto address =
+      fixture.Address(fixture.UserData(3), fixture.UserData(4), 0xd60);
+
+  const auto MakeAddressImage =
+      [&](Value key, uint32_t pc, bool malformed) {
+        const auto offset = fixture.Emit(
+            ValueOpcode::ShiftLeftLogical32, {key, Value(5u)}, 0, header);
+        std::array<Value, 8> words;
+        for (uint32_t dword = 0; dword < words.size(); dword++) {
+          MemoryInfo memory;
+          memory.kind = ResourceKind::ScalarAddress;
+          memory.offset = dword * sizeof(uint32_t);
+          if (malformed && dword == words.size() - 1u) {
+            memory.offset += sizeof(uint32_t);
+          }
+          words[dword] = fixture.Emit(
+              ValueOpcode::LoadAddressU32,
+              {address, offset, Value(0u), Value(true)},
+              fixture.AddMemory(memory, pc), header);
+        }
+        return fixture.Image(words, pc);
+      };
+
+  const auto raw_image = MakeAddressImage(read_lane, 0xd94, false);
+  const auto raw = AnalyzeAddressIndirectImage(
+      fixture.program, *raw_image.ResolveInstruction());
+  Check(raw.has_value() && raw->conditional_key_range.minimum == 0u &&
+            raw->conditional_key_range.maximum == 7u &&
+            raw->descriptor_stride == 32u && raw->candidate_count == 8u &&
+            raw->address_handle == address.ResolveInstruction() &&
+            raw->requires_nonempty_wave_mask,
+        "raw waterfall address image was not recognized as an 8-entry array");
+
+  const auto incremented =
+      fixture.Emit(ValueOpcode::IAdd32, {read_lane, Value(1u)}, 0, header);
+  const auto clamped =
+      fixture.Emit(ValueOpcode::SMin32, {incremented, Value(7u)}, 0, header);
+  const auto clamped_image = MakeAddressImage(clamped, 0xd98, false);
+  const auto shifted = AnalyzeAddressIndirectImage(
+      fixture.program, *clamped_image.ResolveInstruction());
+  Check(shifted.has_value() && shifted->conditional_key_range.minimum == 1u &&
+            shifted->conditional_key_range.maximum == 7u &&
+            shifted->descriptor_stride == 32u &&
+            shifted->candidate_count == 8u,
+        "clamped waterfall address image lost its 1..7 bounded key domain");
+
+  const auto malformed_image = MakeAddressImage(read_lane, 0xd9c, true);
+  Check(!AnalyzeAddressIndirectImage(
+             fixture.program, *malformed_image.ResolveInstruction())
+             .has_value(),
+        "address image analysis accepted a malformed descriptor stride");
 }
 
 void TestImagesSamplersAndAliases() {
@@ -2285,6 +2415,7 @@ int main() {
     Run("runtime unsigned multiply high", TestRuntimeUnsignedMultiplyHighDescriptor);
     Run("bounded resource key analysis", TestBoundedResourceKeyAnalysis);
     Run("waterfall read lane provenance", TestWaterfallReadLaneProvenance);
+    Run("address indirect image analysis", TestAddressIndirectImageAnalysis);
     Run("images and samplers", TestImagesSamplersAndAliases);
     Run("SampleAdjust sampler scratch", TestSampleAdjustSamplerScratch);
     Run("FMASK load specialization", TestFmaskLoadSpecialization);
