@@ -1,4 +1,5 @@
 #include "graphics/shader/recompiler/ir/passes/ResourceTracking.h"
+#include "graphics/shader/recompiler/ir/passes/ResourceAddressAnalysis.h"
 
 #include "common/assert.h"
 #include "common/logging/log.h"
@@ -437,6 +438,20 @@ private:
 		return true;
 	}
 
+	bool MakeRuntimeAddressSource(const Inst& handle, uint32_t pc, uint32_t& source,
+	                              DescriptorSource& descriptor) {
+		if (handle.GetOpcode() != ValueOpcode::GetAddressResource) {
+			return false;
+		}
+		MakeSource(handle, 2u, false, false, descriptor, pc);
+		uint32_t bad_dword = 0;
+		if (!ValidateSource(descriptor, bad_dword)) {
+			return false;
+		}
+		source = InternSource(descriptor);
+		return true;
+	}
+
 	bool MatchMaterialOffset(Value value, Value& selector, uint32_t& stride,
 	                         uint32_t& offset) const {
 		value           = value.Resolve();
@@ -471,7 +486,7 @@ private:
 		       selector_inst->GetOpcode() == ValueOpcode::ReadFirstLane;
 	}
 
-	bool TryMakeIndirectImage(Inst& handle, uint32_t pc, IndirectImagePlan& plan) {
+	bool TryMakeMaterialIndirectImage(Inst& handle, uint32_t pc, IndirectImagePlan& plan) {
 		if (handle.GetOpcode() != ValueOpcode::GetImageResource || handle.NumArgs() != 8u) {
 			return false;
 		}
@@ -580,6 +595,51 @@ private:
 		return true;
 	}
 
+	bool TryMakeAddressIndirectImage(Inst& handle, uint32_t pc, IndirectImagePlan& plan) {
+		const auto analysis = AnalyzeAddressIndirectImage(m_program, handle);
+		if (!analysis.has_value() || analysis->requires_nonempty_wave_mask ||
+		    analysis->address_handle == nullptr || analysis->candidate_count == 0u) {
+			return false;
+		}
+
+		for (uint32_t dword = 0; dword < analysis->reads.size(); dword++) {
+			if (analysis->reads[dword] == nullptr ||
+			    !MemoryIndexBelongsTo(analysis->memory[dword], *analysis->reads[dword])) {
+				return false;
+			}
+			plan.memory[dword] = analysis->memory[dword];
+			plan.reads[dword]  = analysis->reads[dword];
+		}
+
+		DescriptorSource address_source;
+		uint32_t         address_source_index = 0;
+		if (!MakeRuntimeAddressSource(*analysis->address_handle, pc, address_source_index,
+		                              address_source)) {
+			return false;
+		}
+
+		DescriptorSource image_source;
+		image_source.dword_count = 8u;
+		image_source.dwords[4]   = address_source.dwords[0];
+		image_source.dwords[5]   = address_source.dwords[1];
+		image_source.dwords[6]   = Value(0u);
+		image_source.dwords[7]   = Value(0u);
+
+		DescriptorSource::IndirectImage indirect_image;
+		indirect_image.kind              = DescriptorSource::IndirectImageKind::AddressArray;
+		indirect_image.address_source    = address_source_index;
+		indirect_image.descriptor_stride = analysis->descriptor_stride;
+		indirect_image.candidate_count   = analysis->candidate_count;
+		indirect_image.key_arg           = 0u;
+		image_source.indirect_image      = indirect_image;
+
+		plan.handle = &handle;
+		plan.source = InternSource(image_source);
+		plan.key    = analysis->key;
+		plan.roots  = image_source.dwords;
+		return true;
+	}
+
 	const IndirectImagePlan* FindIndirectImage(const Inst& handle) const {
 		const auto found =
 		    std::find_if(m_indirect_images.begin(), m_indirect_images.end(),
@@ -608,7 +668,8 @@ private:
 					continue;
 				}
 				IndirectImagePlan plan;
-				if (TryMakeIndirectImage(*handle, inst.Flags<MemoryFlags>().pc, plan)) {
+				if (TryMakeAddressIndirectImage(*handle, inst.Flags<MemoryFlags>().pc, plan) ||
+				    TryMakeMaterialIndirectImage(*handle, inst.Flags<MemoryFlags>().pc, plan)) {
 					m_indirect_images.push_back(std::move(plan));
 				}
 			}
