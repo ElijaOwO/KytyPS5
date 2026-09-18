@@ -633,6 +633,7 @@ private:
 		indirect_image.kind              = DescriptorSource::IndirectImageKind::AddressArray;
 		indirect_image.address_source    = address_source_index;
 		indirect_image.descriptor_stride = analysis->descriptor_stride;
+		indirect_image.first_key         = analysis->conditional_key_range.minimum;
 		indirect_image.candidate_count   = analysis->candidate_count;
 		indirect_image.key_arg           = 0u;
 		image_source.indirect_image      = indirect_image;
