@@ -1,5 +1,6 @@
 #include "graphics/shader/recompiler/ir/passes/ResourceAddressAnalysis.h"
 
+#include "common/logging/log.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceWaveAnalysis.h"
 
 #include <array>
@@ -75,9 +76,19 @@ bool MatchDescriptorOffset(Value value, Value& key, uint32_t& stride) {
 
 std::optional<AddressIndirectImageAnalysis> AnalyzeAddressIndirectImage(
     const Program& program, const Inst& handle) {
+	const auto flags = handle.Flags<MemoryFlags>();
+	const bool diagnose =
+	    program.shader_hash == 0x5419ddf79a5127afull && flags.pc == 0x00000d94u;
+	const auto reject = [&](const char* reason) -> std::optional<AddressIndirectImageAnalysis> {
+		if (diagnose) {
+			LOGF("BUG0006_ADDRESS_REJECT %s\n", reason);
+		}
+		return std::nullopt;
+	};
+
 	if (handle.GetOpcode() != ValueOpcode::GetImageResource ||
 	    handle.NumArgs() != ImageDescriptorDwords) {
-		return std::nullopt;
+		return reject("handle_shape");
 	}
 
 	AddressIndirectImageAnalysis result;
@@ -89,17 +100,22 @@ std::optional<AddressIndirectImageAnalysis> AnalyzeAddressIndirectImage(
 		if (read == nullptr || read->GetOpcode() != ValueOpcode::LoadAddressU32 ||
 		    read->NumArgs() != 4u || !ImmediateU32(read->Arg(2), 0u) ||
 		    !ImmediateTrue(read->Arg(3))) {
-			return std::nullopt;
+			return reject("read_shape");
 		}
 
 		const auto flags = read->Flags<MemoryFlags>();
 		if (flags.index >= program.memory_info.size()) {
-			return std::nullopt;
+			return reject("memory_index");
 		}
 		const auto& memory = program.memory_info[flags.index];
 		if (!IsAddressResourceKind(memory.kind) || memory.data_bits != 32u ||
 		    memory.data_dwords != 1u || memory.offset != dword * sizeof(uint32_t)) {
-			return std::nullopt;
+			if (diagnose) {
+				LOGF("BUG0006_ADDRESS_MEMORY dword=%u kind=%u bits=%u dwords=%u offset=%u expected=%u\n",
+				     dword, static_cast<uint32_t>(memory.kind), memory.data_bits,
+				     memory.data_dwords, memory.offset, dword * static_cast<uint32_t>(sizeof(uint32_t)));
+			}
+			return reject("memory_shape");
 		}
 
 		auto* current_address = read->Arg(0).Resolve().TryInstruction();
@@ -107,7 +123,7 @@ std::optional<AddressIndirectImageAnalysis> AnalyzeAddressIndirectImage(
 		    current_address->GetOpcode() != ValueOpcode::GetAddressResource ||
 		    current_address->NumArgs() != 2u ||
 		    (address_handle != nullptr && current_address != address_handle)) {
-			return std::nullopt;
+			return reject("address_shape");
 		}
 		address_handle = current_address;
 
@@ -115,7 +131,7 @@ std::optional<AddressIndirectImageAnalysis> AnalyzeAddressIndirectImage(
 		if (dword == 0u) {
 			byte_offset = current_offset;
 		} else if (!EquivalentValue(program, byte_offset, current_offset)) {
-			return std::nullopt;
+			return reject("offset_mismatch");
 		}
 
 		result.reads[dword]  = read;
@@ -126,27 +142,30 @@ std::optional<AddressIndirectImageAnalysis> AnalyzeAddressIndirectImage(
 	uint32_t stride = 0;
 	if (!MatchDescriptorOffset(byte_offset, key, stride) ||
 	    stride != ImageDescriptorStride) {
-		return std::nullopt;
+		return reject("key_shape");
 	}
 
 	const auto read_lane = FindReadLane(key);
 	if (read_lane.IsEmpty()) {
-		return std::nullopt;
+		return reject("readlane_missing");
 	}
 	const auto wave = AnalyzeWaterfallReadLane(program, read_lane);
 	if (!wave.has_value()) {
-		return std::nullopt;
+		return reject("wave_proof");
 	}
 
 	if (!ProveWaterfallReadLaneUseGuard(program, *wave, handle)) {
-		return std::nullopt;
+		return reject("use_guard");
 	}
 
 	const auto range = AnalyzeResourceKeyRange(
 	    key, {.condition = wave->lane_condition,
 	          .selected_lane_satisfies_condition = true});
 	if (!range.has_value() || range->maximum >= MaxAddressImageCandidates) {
-		return std::nullopt;
+		if (diagnose && range.has_value()) {
+			LOGF("BUG0006_ADDRESS_RANGE min=%u max=%u\n", range->minimum, range->maximum);
+		}
+		return reject("range");
 	}
 
 	result.key                         = key;
@@ -157,6 +176,11 @@ std::optional<AddressIndirectImageAnalysis> AnalyzeAddressIndirectImage(
 	result.descriptor_stride           = stride;
 	result.candidate_count             = range->maximum - range->minimum + 1u;
 	result.requires_nonempty_wave_mask = false;
+	if (diagnose) {
+		LOGF("BUG0006_ADDRESS_ACCEPT min=%u max=%u stride=%u candidates=%u\n",
+		     result.conditional_key_range.minimum, result.conditional_key_range.maximum,
+		     result.descriptor_stride, result.candidate_count);
+	}
 	return result;
 }
 
