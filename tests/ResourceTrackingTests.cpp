@@ -1142,6 +1142,45 @@ void TestAddressIndirectImageAnalysis() {
              fixture.program, *malformed_image.ResolveInstruction())
              .has_value(),
         "address image analysis accepted a malformed descriptor stride");
+
+  const auto sampler = fixture.Sampler(
+      {Value(0u), Value(0u), Value(0u), Value(0u)}, 0xda0);
+  MemoryInfo sample;
+  sample.kind = ResourceKind::Image;
+  sample.image_dimension = Decoder::ImageDimension::Dim2D;
+  fixture.Emit(ValueOpcode::ImageSampleRaw,
+               {raw_image, sampler, fixture.ImageAddress()},
+               fixture.AddMemory(sample, 0xda0), body);
+
+  fixture.PlanAndTrack();
+
+  Check(fixture.program.info.images.size() == 1u,
+        "address-backed indirect image did not produce one tracked image");
+  const auto source_index = fixture.program.info.images[0].source;
+  Check(source_index < fixture.program.descriptor_sources.size(),
+        "address-backed indirect image source index is out of range");
+  const auto &source = fixture.program.descriptor_sources[source_index];
+  Check(source.indirect_image.has_value() &&
+            source.indirect_image->kind ==
+                DescriptorSource::IndirectImageKind::AddressArray &&
+            source.indirect_image->descriptor_stride == 32u &&
+            source.indirect_image->candidate_count == 8u &&
+            source.indirect_image->key_arg == 0u,
+        "resource tracker did not retain the address-array indirect image plan");
+  Check(source.indirect_image->address_source <
+            fixture.program.descriptor_sources.size() &&
+            fixture.program
+                    .descriptor_sources[source.indirect_image->address_source]
+                    .dword_count == 2u,
+        "address-array plan did not retain its runtime base address source");
+  Check(raw_image.ResolveInstruction()->Arg(0).Resolve() == read_lane.Resolve(),
+        "address-array image handle did not retain the GPU runtime key");
+  Check(std::ranges::all_of(
+            raw->memory, [&](uint32_t index) {
+              return index < fixture.program.memory_info.size() &&
+                     fixture.program.memory_info[index].planning_only;
+            }),
+        "address-array descriptor loads were not marked planning-only");
 }
 
 void TestImagesSamplersAndAliases() {
