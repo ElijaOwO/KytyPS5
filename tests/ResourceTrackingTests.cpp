@@ -5,6 +5,7 @@
 #include "graphics/shader/recompiler/ir/passes/ResourceKeyAnalysis.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceTracking.h"
+#include "graphics/shader/recompiler/ir/passes/ResourceWaveAnalysis.h"
 #include "graphics/shader/recompiler/ir/passes/ShaderInfoCollection.h"
 #include "graphics/shader/recompiler/ir/passes/SrtWalker.h"
 
@@ -824,6 +825,133 @@ void TestBoundedResourceKeyAnalysis() {
             clamped_offset_range->minimum == 32u &&
             clamped_offset_range->maximum == 224u,
         "clamped bounded key did not produce the expected 32-byte offset range");
+}
+
+void TestWaterfallReadLaneProvenance() {
+  Fixture fixture;
+  auto *entry = fixture.block;
+  auto *header = fixture.AddBlock();
+  auto *latch = fixture.AddBlock();
+
+  const auto guard = fixture.Emit(
+      ValueOpcode::INotEqual32, {fixture.UserData(0), Value(0u)}, 0, entry);
+  const auto active = fixture.Emit(
+      ValueOpcode::LogicalAnd, {guard, Value(true)}, 0, entry);
+  const auto ballot =
+      fixture.Emit(ValueOpcode::Ballot, {active}, 0, entry);
+  const auto low_initial = fixture.Emit(
+      ValueOpcode::CompositeExtractU32x4, {ballot, Value(0u)}, 0, entry);
+  const auto high_initial = fixture.Emit(
+      ValueOpcode::CompositeExtractU32x4, {ballot, Value(1u)}, 0, entry);
+
+  auto &low_phi = header->AppendNewInst(ValueOpcode::Phi);
+  low_phi.SetFlags(Type::U32);
+  auto &high_phi = header->AppendNewInst(ValueOpcode::Phi);
+  high_phi.SetFlags(Type::U32);
+
+  const auto clear_ballot =
+      fixture.Emit(ValueOpcode::Ballot, {Value(true)}, 0, latch);
+  const auto clear_low = fixture.Emit(
+      ValueOpcode::CompositeExtractU32x4,
+      {clear_ballot, Value(0u)}, 0, latch);
+  const auto clear_high = fixture.Emit(
+      ValueOpcode::CompositeExtractU32x4,
+      {clear_ballot, Value(1u)}, 0, latch);
+  const auto keep_low = fixture.Emit(
+      ValueOpcode::BitwiseNot32, {clear_low}, 0, latch);
+  const auto keep_high = fixture.Emit(
+      ValueOpcode::BitwiseNot32, {clear_high}, 0, latch);
+  const auto next_low = fixture.Emit(
+      ValueOpcode::BitwiseAnd32, {Value(&low_phi), keep_low}, 0, latch);
+  const auto next_high = fixture.Emit(
+      ValueOpcode::BitwiseAnd32, {Value(&high_phi), keep_high}, 0, latch);
+
+  low_phi.AddPhiOperand(entry, low_initial);
+  low_phi.AddPhiOperand(latch, next_low);
+  high_phi.AddPhiOperand(entry, high_initial);
+  high_phi.AddPhiOperand(latch, next_high);
+
+  const auto low_nonzero = fixture.Emit(
+      ValueOpcode::INotEqual32, {Value(&low_phi), Value(0u)}, 0, header);
+  const auto high_nonzero = fixture.Emit(
+      ValueOpcode::INotEqual32, {Value(&high_phi), Value(0u)}, 0, header);
+  const auto low_lane = fixture.Emit(
+      ValueOpcode::FindILsb32, {Value(&low_phi)}, 0, header);
+  const auto high_lsb = fixture.Emit(
+      ValueOpcode::FindILsb32, {Value(&high_phi)}, 0, header);
+  const auto high_lane = fixture.Emit(
+      ValueOpcode::IAdd32, {high_lsb, Value(32u)}, 0, header);
+  const auto high_or_fallback = fixture.Emit(
+      ValueOpcode::SelectU32,
+      {high_nonzero, high_lane, Value(0xffffffffu)}, 0, header);
+  const auto selected_lane = fixture.Emit(
+      ValueOpcode::SelectU32,
+      {low_nonzero, low_lane, high_or_fallback}, 0, header);
+  const auto masked_lane = fixture.Emit(
+      ValueOpcode::BitwiseAnd32, {selected_lane, Value(0x3fu)}, 0, header);
+
+  const auto bounded = fixture.Emit(
+      ValueOpcode::SelectU32, {active, Value(5u), fixture.UserData(1)}, 0,
+      entry);
+  const auto read = fixture.Emit(
+      ValueOpcode::ReadLane, {bounded, masked_lane}, 0, header);
+
+  const auto proof = AnalyzeWaterfallReadLane(fixture.program, read);
+  Check(proof.has_value() &&
+            proof->lane_condition.Resolve() == active.Resolve() &&
+            proof->low_mask.Resolve() == Value(&low_phi).Resolve() &&
+            proof->high_mask.Resolve() == Value(&high_phi).Resolve() &&
+            proof->may_use_empty_mask_fallback,
+        "ballot waterfall lane provenance was not recognized");
+
+  const auto range = AnalyzeResourceKeyRange(
+      read, {.condition = proof->lane_condition,
+             .selected_lane_satisfies_condition = true});
+  Check(range.has_value() && range->minimum == 5u && range->maximum == 5u,
+        "waterfall provenance did not unlock the conditional key range");
+
+  auto *bad_header = fixture.AddBlock();
+  auto *bad_latch = fixture.AddBlock();
+  auto &bad_low_phi = bad_header->AppendNewInst(ValueOpcode::Phi);
+  bad_low_phi.SetFlags(Type::U32);
+  auto &bad_high_phi = bad_header->AppendNewInst(ValueOpcode::Phi);
+  bad_high_phi.SetFlags(Type::U32);
+  const auto bad_next_low = fixture.Emit(
+      ValueOpcode::BitwiseOr32, {Value(&bad_low_phi), Value(1u)}, 0,
+      bad_latch);
+  const auto bad_next_high = fixture.Emit(
+      ValueOpcode::BitwiseAnd32, {Value(&bad_high_phi), keep_high}, 0,
+      bad_latch);
+  bad_low_phi.AddPhiOperand(entry, low_initial);
+  bad_low_phi.AddPhiOperand(bad_latch, bad_next_low);
+  bad_high_phi.AddPhiOperand(entry, high_initial);
+  bad_high_phi.AddPhiOperand(bad_latch, bad_next_high);
+
+  const auto bad_low_nonzero = fixture.Emit(
+      ValueOpcode::INotEqual32, {Value(&bad_low_phi), Value(0u)}, 0,
+      bad_header);
+  const auto bad_high_nonzero = fixture.Emit(
+      ValueOpcode::INotEqual32, {Value(&bad_high_phi), Value(0u)}, 0,
+      bad_header);
+  const auto bad_low_lane = fixture.Emit(
+      ValueOpcode::FindILsb32, {Value(&bad_low_phi)}, 0, bad_header);
+  const auto bad_high_lsb = fixture.Emit(
+      ValueOpcode::FindILsb32, {Value(&bad_high_phi)}, 0, bad_header);
+  const auto bad_high_lane = fixture.Emit(
+      ValueOpcode::IAdd32, {bad_high_lsb, Value(32u)}, 0, bad_header);
+  const auto bad_high_or_fallback = fixture.Emit(
+      ValueOpcode::SelectU32,
+      {bad_high_nonzero, bad_high_lane, Value(0xffffffffu)}, 0, bad_header);
+  const auto bad_selected_lane = fixture.Emit(
+      ValueOpcode::SelectU32,
+      {bad_low_nonzero, bad_low_lane, bad_high_or_fallback}, 0, bad_header);
+  const auto bad_masked_lane = fixture.Emit(
+      ValueOpcode::BitwiseAnd32, {bad_selected_lane, Value(0x3fu)}, 0,
+      bad_header);
+  const auto bad_read = fixture.Emit(
+      ValueOpcode::ReadLane, {bounded, bad_masked_lane}, 0, bad_header);
+  Check(!AnalyzeWaterfallReadLane(fixture.program, bad_read).has_value(),
+        "waterfall provenance accepted a mask recurrence that can add lanes");
 }
 
 void TestImagesSamplersAndAliases() {
@@ -2156,6 +2284,7 @@ int main() {
     Run("runtime unsigned min", TestRuntimeUnsignedMinDescriptor);
     Run("runtime unsigned multiply high", TestRuntimeUnsignedMultiplyHighDescriptor);
     Run("bounded resource key analysis", TestBoundedResourceKeyAnalysis);
+    Run("waterfall read lane provenance", TestWaterfallReadLaneProvenance);
     Run("images and samplers", TestImagesSamplersAndAliases);
     Run("SampleAdjust sampler scratch", TestSampleAdjustSamplerScratch);
     Run("FMASK load specialization", TestFmaskLoadSpecialization);
