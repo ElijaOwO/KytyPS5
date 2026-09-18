@@ -66,7 +66,7 @@ constexpr uint64_t PAGE_TABLE_POOL_SIZE   = 4ull * 1024ull * 1024ull * 1024ull;
 constexpr uint64_t PAGE_TABLE_GRANULARITY = 2ull * 1024ull * 1024ull;
 constexpr int      PAGE_TABLE_POOL_ENTRIES =
     static_cast<int>(PAGE_TABLE_POOL_SIZE / PAGE_TABLE_GRANULARITY);
-constexpr uint64_t DEFAULT_FLEXIBLE_MEMORY_SIZE = 1ull * 1024ull * 1024ull * 1024ull;
+constexpr uint64_t DEFAULT_FLEXIBLE_MEMORY_SIZE = 512ull * 1024ull * 1024ull;
 
 static uint64_t                      g_flexible_memory_size        = DEFAULT_FLEXIBLE_MEMORY_SIZE;
 static bool                          g_flexible_memory_size_frozen = false;
@@ -3565,9 +3565,19 @@ int KYTY_SYSV_ABI KernelAvailableFlexibleMemorySize(size_t* size) {
 		return KERNEL_ERROR_EINVAL;
 	}
 
-	*size = g_flexible_memory->Available();
+	const uint64_t available = g_flexible_memory->Available();
+	constexpr uint64_t H4_1_DIAGNOSTIC_MAIN_PROGRAM_QUOTA = 0x073d0000ull;
+	const uint64_t adjusted_available =
+	    available >= H4_1_DIAGNOSTIC_MAIN_PROGRAM_QUOTA
+	        ? available - H4_1_DIAGNOSTIC_MAIN_PROGRAM_QUOTA
+	        : 0;
 
-	LOGF("\t *size = 0x%016" PRIx64 "\n", *size);
+	*size = static_cast<size_t>(adjusted_available);
+
+	LOGF("\t h4_1_raw_available       = 0x%016" PRIx64 "\n"
+	     "\t h4_1_main_program_quota  = 0x%016" PRIx64 "\n"
+	     "\t *size                    = 0x%016" PRIx64 "\n",
+	     available, H4_1_DIAGNOSTIC_MAIN_PROGRAM_QUOTA, static_cast<uint64_t>(*size));
 
 	return OK;
 }
