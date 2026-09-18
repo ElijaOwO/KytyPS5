@@ -4190,7 +4190,23 @@ struct TessellationDriverState {
 
 static TessellationDriverState g_tessellation_driver_state {};
 
+static bool is_bug0005_candidate(const uint32_t* dcb, uint32_t size_in_dwords) {
+	return dcb != nullptr && size_in_dwords == 96u && dcb[0] == 0xc0061000u && dcb[8] == 0u;
+}
+
+static void log_bug0005_submit(const char* entry, const uint32_t* dcb, uint32_t size_in_dwords,
+                               uint32_t queue, uint32_t flags) {
+	if (!is_bug0005_candidate(dcb, size_in_dwords)) return;
+	LOGF("BUG-0005 submit provenance: entry=%s addr=0x%016" PRIx64
+	     " dw_num=%" PRIu32 " queue=0x%08" PRIx32 " flags=0x%02" PRIx32 "\n",
+	     entry, reinterpret_cast<uint64_t>(dcb), size_in_dwords, queue, flags);
+}
+
 static void submit_dcb(uint32_t* dcb, uint32_t size_in_dwords) {
+	if (is_bug0005_candidate(dcb, size_in_dwords)) {
+		LOGF("BUG-0005 submit sink: addr=0x%016" PRIx64 " dw_num=%" PRIu32 "\n",
+		     reinterpret_cast<uint64_t>(dcb), size_in_dwords);
+	}
 	GraphicsDbgDumpDcb("d", size_in_dwords, dcb);
 	EXIT_IF(g_renderer == nullptr);
 	g_renderer->GetGpu().Submit(std::span {dcb, size_in_dwords}, {});
@@ -4200,6 +4216,9 @@ int KYTY_SYSV_ABI AgcDriverSubmitDcb(const Packet* packet) {
 	PRINT_NAME();
 
 	EXIT_NOT_IMPLEMENTED(packet == nullptr);
+
+	log_bug0005_submit("AgcDriverSubmitDcb", packet->addr, packet->dw_num, 0xffffffffu,
+	                   packet->flags);
 
 	AgcTrace("\t addr   = 0x%016" PRIx64 "\n"
 	     "\t dw_num = 0x%08" PRIx32 "\n"
@@ -4231,6 +4250,8 @@ int KYTY_SYSV_ABI AgcDriverSubmitMultiDcbs(uint32_t* const* dcb_gpu_addrs,
 		AgcTrace("\t dcb[%" PRIu32 "]  = 0x%016" PRIx64 "\n"
 		     "\t size[%" PRIu32 "] = 0x%08" PRIx32 "\n",
 		     i, reinterpret_cast<uint64_t>(dcb), i, size_in_dwords);
+
+		log_bug0005_submit("AgcDriverSubmitMultiDcbs", dcb, size_in_dwords, 0xffffffffu, 0xffu);
 
 		if (dcb != nullptr) {
 			submit_dcb(dcb, size_in_dwords);
@@ -4285,6 +4306,8 @@ int KYTY_SYSV_ABI AgcDriverSubmitCommandBuffer(void* queue_context, const Packet
 	}
 
 	const uint32_t queue = get_driver_queue(queue_context);
+	log_bug0005_submit("AgcDriverSubmitCommandBuffer", packet->addr, packet->dw_num, queue,
+	                   packet->flags);
 	LOGF("\t queue = 0x%08" PRIx32 "\n"
 	     "\t addr  = 0x%016" PRIx64 "\n"
 	     "\t size  = 0x%08" PRIx32 "\n"
@@ -4314,6 +4337,8 @@ int KYTY_SYSV_ABI AgcDriverSubmitMultiCommandBuffers(void*            queue_cont
 
 	const uint32_t queue = get_driver_queue(queue_context);
 	for (uint32_t i = 0; i < count; i++) {
+		log_bug0005_submit("AgcDriverSubmitMultiCommandBuffers", command_buffers[i],
+		                   sizes_in_dwords[i], queue, 0xffu);
 		submit_command_buffer(queue, command_buffers[i], sizes_in_dwords[i]);
 	}
 	return OK;
