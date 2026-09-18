@@ -1,10 +1,12 @@
 #include "graphics/shader/recompiler/ir/passes/ResourceTracking.h"
 
 #include "common/assert.h"
+#include "common/logging/log.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "graphics/shader/recompiler/ir/passes/SrtWalker.h"
 
 #include <algorithm>
+#include <atomic>
 #include <fmt/format.h>
 #include <span>
 #include <utility>
@@ -167,6 +169,87 @@ private:
 		                m_program.shader_hash, StageName(m_program.stage), pc, reason);
 		EXIT("%s", message.c_str());
 		std::abort();
+	}
+
+	void CaptureBug0006(const char* path, uint32_t pc, uint32_t bad_dword,
+	                    const DescriptorSource& descriptor) const {
+		if (m_program.stage != ShaderType::Compute || pc != 0x0d94u) {
+			return;
+		}
+		static std::atomic_flag captured = ATOMIC_FLAG_INIT;
+		if (captured.test_and_set()) {
+			return;
+		}
+		const auto header = fmt::format(
+		    "BUG0006_FAIL path={} hash=0x{:016x} stage={} pc=0x{:08x} dword={} shader_writes={} user_data_base={} user_data_count={}",
+		    path, m_program.shader_hash, StageName(m_program.stage), pc, bad_dword, m_shader_writes,
+		    m_program.user_data_base, m_program.user_data_count);
+		LOGF("%s\n", header.c_str());
+		if (std::string_view(path) == "RUNTIME") {
+			const auto& failure = GetRuntimeValidationFailure();
+			const auto* inst    = failure.instruction;
+			if (inst != nullptr) {
+				auto line = fmt::format("BUG0006_RUNTIME_REJECT reason={} opcode={} type={} args={}",
+				                        failure.reason != nullptr ? failure.reason : "UNKNOWN",
+				                        ValueOpcodeName(inst->GetOpcode()), TypeName(inst->GetType()),
+				                        inst->NumArgs());
+				LOGF("%s\n", line.c_str());
+				for (size_t arg_index = 0; arg_index < inst->NumArgs(); arg_index++) {
+					const auto arg = inst->Arg(arg_index).Resolve();
+					if (arg.IsImmediate() && arg.GetType() == Type::U32) {
+						line = fmt::format("BUG0006_RUNTIME_ARG index={} type={} value=0x{:08x}",
+						                   arg_index, TypeName(arg.GetType()), arg.U32());
+					} else {
+						const auto* arg_inst = arg.TryInstruction();
+						line = fmt::format("BUG0006_RUNTIME_ARG index={} type={} opcode={} immediate={}",
+						                   arg_index, TypeName(arg.GetType()),
+						                   arg_inst != nullptr ? ValueOpcodeName(arg_inst->GetOpcode()) : std::string_view("none"),
+						                   arg.IsImmediate());
+					}
+					LOGF("%s\n", line.c_str());
+				}
+			}
+		}
+		for (uint32_t index = 0; index < descriptor.dword_count; index++) {
+			const auto resolved = descriptor.dwords[index].Resolve();
+			const auto* inst = resolved.TryInstruction();
+			std::string detail;
+			if (resolved.IsImmediate()) {
+				if (resolved.GetType() == Type::U32) {
+					detail = fmt::format("immediate=0x{:08x}", resolved.U32());
+				} else {
+					detail = "immediate=1";
+				}
+			} else if (inst != nullptr) {
+				detail = fmt::format("opcode={} args={} node=0x{:016x}",
+				                     ValueOpcodeName(inst->GetOpcode()), inst->NumArgs(),
+				                     reinterpret_cast<uint64_t>(inst));
+				if (inst->GetOpcode() == ValueOpcode::ReadConstBuffer ||
+				    inst->GetOpcode() == ValueOpcode::LoadAddressU32) {
+					const auto flags = inst->Flags<MemoryFlags>();
+					detail += fmt::format(" mem_index={} mem_pc=0x{:08x}", flags.index, flags.pc);
+				}
+			} else {
+				detail = "non_instruction=1";
+			}
+			const auto line = fmt::format("BUG0006_DWORD index={} type={} {}", index,
+			                              TypeName(resolved.GetType()), detail);
+			LOGF("%s\n", line.c_str());
+			if (inst != nullptr) {
+				for (size_t arg_index = 0; arg_index < inst->NumArgs(); arg_index++) {
+					const auto arg = inst->Arg(arg_index).Resolve();
+					const auto* arg_inst = arg.TryInstruction();
+					const auto arg_line = fmt::format(
+					    "BUG0006_ARG dword={} arg={} type={} opcode={} immediate={}", index,
+					    arg_index, TypeName(arg.GetType()),
+					    arg_inst != nullptr ? ValueOpcodeName(arg_inst->GetOpcode()) : std::string_view("none"),
+					    arg.IsImmediate());
+					LOGF("%s\n", arg_line.c_str());
+				}
+			}
+		}
+		const auto ir = ProgramToString(m_program);
+		LOGF("BUG0006_IR_BEGIN\n%sBUG0006_IR_END\n", ir.c_str());
 	}
 
 	Value LowerDescriptorPhi(Value value) {
@@ -539,6 +622,7 @@ private:
 			for (; bad_dword < descriptor.dword_count; bad_dword++) {
 				const auto* value = descriptor.dwords[bad_dword].Resolve().TryInstruction();
 				if (value != nullptr && value->GetOpcode() == ValueOpcode::ReadConstBuffer) {
+					CaptureBug0006("DIRECT_RCB", pc, bad_dword, descriptor);
 					Fail(pc, fmt::format("{} dword {} is not a valid runtime value",
 					                     ValueOpcodeName(expected), bad_dword));
 				}
@@ -546,6 +630,9 @@ private:
 			bad_dword = 0;
 		}
 		if (!ValidateSource(descriptor, bad_dword)) {
+			const auto resolved = descriptor.dwords[bad_dword].Resolve();
+			CaptureBug0006(resolved.GetType() != Type::U32 ? "TYPE" : "RUNTIME", pc, bad_dword,
+			               descriptor);
 			Fail(pc, fmt::format("{} dword {} is not a valid runtime value",
 			                     ValueOpcodeName(expected), bad_dword));
 		}
