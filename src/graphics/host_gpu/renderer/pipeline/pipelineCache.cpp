@@ -344,6 +344,42 @@ struct PipelineCache::ProgramCache {
 		} else {
 			options.wave_size = input_info.wave_size;
 		}
+		if constexpr (std::is_same_v<InputInfo, ShaderComputeInputInfo>) {
+			if (params.hash == 0x0ee8d3cb56f5a719ull && params.user_data.size() >= 2u) {
+				const uint64_t address = static_cast<uint64_t>(params.user_data[0]) |
+				                         (static_cast<uint64_t>(params.user_data[1]) << 32u);
+				uint32_t value = 0;
+				const bool readable = ReadShaderGuestMemory(nullptr, address, &value);
+				LOGF("BUG0006_SELECTOR_BASE hash=0x%016" PRIx64
+				     " user0=0x%08" PRIx32 " user1=0x%08" PRIx32
+				     " addr=0x%016" PRIx64 " readable=%u value=0x%08" PRIx32 "\n",
+				     params.hash, params.user_data[0], params.user_data[1], address,
+				     readable ? 1u : 0u, value);
+				if (readable) {
+					const uint64_t product = static_cast<uint64_t>(value) * 0xaaaaaaabull;
+					const uint32_t selector = static_cast<uint32_t>(product >> 32u) >> 7u;
+					const uint32_t offset = selector << 5u;
+					const uint64_t descriptor_address = address + offset;
+					std::array<uint32_t, 8> descriptor {};
+					bool descriptor_readable = true;
+					for (uint32_t i = 0; i < descriptor.size(); i++) {
+						if (!ReadShaderGuestMemory(nullptr, descriptor_address + i * sizeof(uint32_t),
+						                           &descriptor[i])) {
+							descriptor_readable = false;
+							break;
+						}
+					}
+					LOGF("BUG0006_DESCRIPTOR selector=0x%08" PRIx32 " offset=0x%08" PRIx32
+					     " addr=0x%016" PRIx64
+					     " readable=%u dwords=%08" PRIx32 ",%08" PRIx32 ",%08" PRIx32
+					     ",%08" PRIx32 ",%08" PRIx32 ",%08" PRIx32 ",%08" PRIx32
+					     ",%08" PRIx32 "\n",
+					     selector, offset, descriptor_address, descriptor_readable ? 1u : 0u,
+					     descriptor[0], descriptor[1], descriptor[2], descriptor[3],
+					     descriptor[4], descriptor[5], descriptor[6], descriptor[7]);
+				}
+			}
+		}
 		auto translated = ShaderRecompiler::TranslateProgram(params.code, options);
 		if (entry == programs.end()) {
 			auto resource_plan = ShaderRecompiler::IR::ExtractResourcePlan(translated.program);
