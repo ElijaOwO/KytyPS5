@@ -1,5 +1,6 @@
 #include "graphics/shader/recompiler/ir/passes/ResourceWaveAnalysis.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 
@@ -74,38 +75,56 @@ bool ClearsOnly(Value value, Inst* phi) {
 
 struct MaskOrigin {
 	Inst* ballot = nullptr;
+	Inst* phi = nullptr;
 	Value condition;
+	Value backedge_value;
+	Block* header = nullptr;
+	Block* initial_block = nullptr;
+	Block* backedge_block = nullptr;
 };
 
 std::optional<MaskOrigin> AnalyzeMaskOrigin(Value value, uint32_t component) {
 	value       = value.Resolve();
 	auto* phi   = value.TryInstruction();
 	if (phi == nullptr || phi->GetOpcode() != ValueOpcode::Phi ||
-	    phi->NumArgs() == 0u || phi->NumArgs() != phi->NumPhiBlocks()) {
+	    phi->NumArgs() != 2u || phi->NumPhiBlocks() != 2u ||
+	    phi->Parent() == nullptr) {
 		return std::nullopt;
 	}
 
 	MaskOrigin origin;
-	bool       found_origin = false;
+	origin.phi = phi;
+	origin.header = phi->Parent();
+
 	for (size_t index = 0; index < phi->NumArgs(); index++) {
-		auto incoming = phi->Arg(index).Resolve();
+		const auto incoming = phi->Arg(index).Resolve();
+		auto* incoming_block = phi->PhiBlock(index);
+		if (incoming_block == nullptr) {
+			return std::nullopt;
+		}
 		if (ClearsOnly(incoming, phi)) {
+			if (origin.backedge_block != nullptr) {
+				return std::nullopt;
+			}
+			origin.backedge_block = incoming_block;
+			origin.backedge_value = incoming;
 			continue;
 		}
 
 		Inst* ballot = nullptr;
 		Value condition;
-		if (!MatchBallotComponent(incoming, component, ballot, condition)) {
+		if (!MatchBallotComponent(incoming, component, ballot, condition) ||
+		    origin.initial_block != nullptr) {
 			return std::nullopt;
 		}
-		if (!found_origin) {
-			origin       = {.ballot = ballot, .condition = condition};
-			found_origin = true;
-		} else if (origin.ballot != ballot || origin.condition.Resolve() != condition.Resolve()) {
-			return std::nullopt;
-		}
+		origin.ballot        = ballot;
+		origin.condition     = condition;
+		origin.initial_block = incoming_block;
 	}
-	if (!found_origin) {
+
+	if (origin.ballot == nullptr || origin.initial_block == nullptr ||
+	    origin.backedge_block == nullptr || origin.backedge_value.IsEmpty() ||
+	    origin.initial_block == origin.backedge_block) {
 		return std::nullopt;
 	}
 	return origin;
@@ -174,6 +193,100 @@ bool MatchSelector(Value selector, Value& low_mask, Value& high_mask) {
 	       MatchHighLane(choose_high->Arg(1), high_mask);
 }
 
+std::optional<size_t> BlockIndex(const Program& program, const Block* block) {
+	for (size_t index = 0; index < program.blocks.size(); index++) {
+		if (program.blocks[index] == block) {
+			return index;
+		}
+	}
+	return std::nullopt;
+}
+
+bool MatchEitherOrder(Value left, Value right, Value expected_left, Value expected_right) {
+	left           = left.Resolve();
+	right          = right.Resolve();
+	expected_left  = expected_left.Resolve();
+	expected_right = expected_right.Resolve();
+	return (left == expected_left && right == expected_right) ||
+	       (left == expected_right && right == expected_left);
+}
+
+bool MatchAnyMaskNonZero(Value condition, Value low, Value high) {
+	condition         = condition.Resolve();
+	const auto* compare = condition.TryInstruction();
+	if (compare == nullptr || compare->GetOpcode() != ValueOpcode::INotEqual32 ||
+	    compare->NumArgs() != 2u) {
+		return false;
+	}
+
+	Value combined;
+	if (ImmediateU32(compare->Arg(0), 0u)) {
+		combined = compare->Arg(1).Resolve();
+	} else if (ImmediateU32(compare->Arg(1), 0u)) {
+		combined = compare->Arg(0).Resolve();
+	} else {
+		return false;
+	}
+
+	const auto* bit_or = combined.TryInstruction();
+	return bit_or != nullptr && bit_or->GetOpcode() == ValueOpcode::BitwiseOr32 &&
+	       bit_or->NumArgs() == 2u &&
+	       MatchEitherOrder(bit_or->Arg(0), bit_or->Arg(1), low, high);
+}
+
+bool EquivalentLoopCondition(Value value, Value target, const Block* header,
+                             const Block* backedge) {
+	value  = value.Resolve();
+	target = target.Resolve();
+	if (value == target) {
+		return true;
+	}
+
+	const auto* phi = value.TryInstruction();
+	if (phi == nullptr || phi->GetOpcode() != ValueOpcode::Phi ||
+	    phi->Parent() != header || phi->NumArgs() != 2u ||
+	    phi->NumPhiBlocks() != 2u) {
+		return false;
+	}
+
+	bool has_target = false;
+	bool has_self   = false;
+	for (size_t index = 0; index < phi->NumArgs(); index++) {
+		const auto incoming = phi->Arg(index).Resolve();
+		const auto* block   = phi->PhiBlock(index);
+		if (incoming == target) {
+			has_target = true;
+			continue;
+		}
+		if (block == backedge && incoming.TryInstruction() == phi) {
+			has_self = true;
+			continue;
+		}
+		return false;
+	}
+	return has_target && has_self;
+}
+
+bool ConditionImpliesLoopCondition(Value condition, Value target, const Block* header,
+                                   const Block* backedge, uint32_t depth = 0u) {
+	if (depth >= 32u) {
+		return false;
+	}
+	condition = condition.Resolve();
+	if (EquivalentLoopCondition(condition, target, header, backedge)) {
+		return true;
+	}
+	const auto* inst = condition.TryInstruction();
+	if (inst == nullptr || inst->GetOpcode() != ValueOpcode::LogicalAnd ||
+	    inst->NumArgs() != 2u) {
+		return false;
+	}
+	return ConditionImpliesLoopCondition(inst->Arg(0), target, header, backedge,
+	                                    depth + 1u) ||
+	       ConditionImpliesLoopCondition(inst->Arg(1), target, header, backedge,
+	                                    depth + 1u);
+}
+
 } // namespace
 
 std::optional<WaterfallReadLaneProof> AnalyzeWaterfallReadLane(
@@ -182,7 +295,7 @@ std::optional<WaterfallReadLaneProof> AnalyzeWaterfallReadLane(
 	value            = value.Resolve();
 	const auto* read = value.TryInstruction();
 	if (read == nullptr || read->GetOpcode() != ValueOpcode::ReadLane ||
-	    read->NumArgs() != 2u) {
+	    read->NumArgs() != 2u || read->Parent() == nullptr) {
 		return std::nullopt;
 	}
 
@@ -196,7 +309,10 @@ std::optional<WaterfallReadLaneProof> AnalyzeWaterfallReadLane(
 	const auto high_origin = AnalyzeMaskOrigin(high_mask, 1u);
 	if (!low_origin.has_value() || !high_origin.has_value() ||
 	    low_origin->ballot != high_origin->ballot ||
-	    low_origin->condition.Resolve() != high_origin->condition.Resolve()) {
+	    low_origin->condition.Resolve() != high_origin->condition.Resolve() ||
+	    low_origin->header != high_origin->header ||
+	    low_origin->initial_block != high_origin->initial_block ||
+	    low_origin->backedge_block != high_origin->backedge_block) {
 		return std::nullopt;
 	}
 
@@ -204,8 +320,61 @@ std::optional<WaterfallReadLaneProof> AnalyzeWaterfallReadLane(
 	    .lane_condition = low_origin->condition.Resolve(),
 	    .low_mask = low_mask.Resolve(),
 	    .high_mask = high_mask.Resolve(),
+	    .low_backedge = low_origin->backedge_value.Resolve(),
+	    .high_backedge = high_origin->backedge_value.Resolve(),
+	    .header = low_origin->header,
+	    .initial_block = low_origin->initial_block,
+	    .backedge_block = low_origin->backedge_block,
+	    .read_block = read->Parent(),
 	    .may_use_empty_mask_fallback = true,
 	};
+}
+
+bool ProveWaterfallReadLaneUseGuard(const Program& program,
+                                    const WaterfallReadLaneProof& proof,
+                                    const Inst& use) {
+	if (program.blocks.size() != program.block_info.size() || proof.header == nullptr ||
+	    proof.initial_block == nullptr || proof.backedge_block == nullptr ||
+	    proof.read_block == nullptr || use.Parent() == nullptr) {
+		return false;
+	}
+
+	const auto header_index   = BlockIndex(program, proof.header);
+	const auto backedge_index = BlockIndex(program, proof.backedge_block);
+	const auto read_index     = BlockIndex(program, proof.read_block);
+	const auto use_index      = BlockIndex(program, use.Parent());
+	if (!header_index.has_value() || !backedge_index.has_value() ||
+	    !read_index.has_value() || !use_index.has_value()) {
+		return false;
+	}
+
+	const auto header_id = program.block_info[*header_index].id;
+	const auto read_id   = program.block_info[*read_index].id;
+	const auto use_id    = program.block_info[*use_index].id;
+
+	const auto& header_term = program.block_info[*header_index].terminator;
+	if (header_term.kind != CFG::TerminatorKind::Branch ||
+	    header_term.true_block != read_id) {
+		return false;
+	}
+
+	const auto& backedge_info = program.block_info[*backedge_index];
+	if (backedge_info.terminator.kind != CFG::TerminatorKind::ConditionalBranch ||
+	    backedge_info.terminator.true_block != header_id ||
+	    !MatchAnyMaskNonZero(backedge_info.condition, proof.low_backedge,
+	                         proof.high_backedge)) {
+		return false;
+	}
+
+	const auto& read_info = program.block_info[*read_index];
+	if (read_info.terminator.kind != CFG::TerminatorKind::ConditionalBranch ||
+	    read_info.terminator.true_block != use_id ||
+	    !ConditionImpliesLoopCondition(read_info.condition, proof.lane_condition,
+	                                  proof.header, proof.backedge_block)) {
+		return false;
+	}
+
+	return true;
 }
 
 } // namespace Libs::Graphics::ShaderRecompiler::IR
