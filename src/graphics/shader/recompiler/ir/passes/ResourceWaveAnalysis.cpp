@@ -367,10 +367,27 @@ bool ProveWaterfallReadLaneUseGuard(const Program& program,
 	}
 
 	const auto& read_info = program.block_info[*read_index];
-	if (read_info.terminator.kind != CFG::TerminatorKind::ConditionalBranch ||
-	    read_info.terminator.true_block != use_id ||
-	    !ConditionImpliesLoopCondition(read_info.condition, proof.lane_condition,
-	                                  proof.header, proof.backedge_block)) {
+	if (read_info.terminator.kind != CFG::TerminatorKind::ConditionalBranch) {
+		return false;
+	}
+
+	bool use_guarded = false;
+	if (read_info.terminator.true_block == use_id) {
+		use_guarded = ConditionImpliesLoopCondition(
+		    read_info.condition, proof.lane_condition, proof.header,
+		    proof.backedge_block);
+	} else if (read_info.terminator.false_block == use_id) {
+		const auto condition = read_info.condition.Resolve();
+		const auto* logical_not = condition.TryInstruction();
+		if (logical_not != nullptr &&
+		    logical_not->GetOpcode() == ValueOpcode::LogicalNot &&
+		    logical_not->NumArgs() == 1u) {
+			use_guarded = ConditionImpliesLoopCondition(
+			    logical_not->Arg(0), proof.lane_condition, proof.header,
+			    proof.backedge_block);
+		}
+	}
+	if (!use_guarded) {
 		return false;
 	}
 
