@@ -679,6 +679,33 @@ void TestRuntimeUnsignedMinDescriptor() {
       "runtime descriptor unsigned minimum did not preserve its first operand");
 }
 
+void TestRuntimeUnsignedMultiplyHighDescriptor() {
+  Fixture fixture;
+  const auto word3 =
+      fixture.Emit(ValueOpcode::UMulHi,
+                   {fixture.UserData(0), Value(0xaaaaaaabu)});
+  const auto descriptor =
+      fixture.Buffer({Value(0u), Value(0u), Value(64u), word3}, 0x338);
+  MemoryInfo memory;
+  memory.kind = ResourceKind::Buffer;
+  fixture.Emit(ValueOpcode::LoadBufferU32,
+               {descriptor, Value(0u), Value(0u), Value(0u), Value(true)},
+               fixture.AddMemory(memory, 0x338));
+  fixture.PlanAndTrack();
+
+  std::array<uint32_t, 1> user_data{0xc0000000u};
+  SrtRuntime runtime{.user_data = user_data};
+  DescriptorValue value;
+  const auto source = fixture.program.info.buffers[0].source;
+  Check(EvaluateDescriptorSource(fixture.program, source, runtime, value) &&
+            value.dwords[3] == 0x80000000u,
+        "runtime descriptor unsigned multiply-high produced the wrong high word");
+  user_data[0] = 3u;
+  Check(EvaluateDescriptorSource(fixture.program, source, runtime, value) &&
+            value.dwords[3] == 2u,
+        "runtime descriptor unsigned multiply-high did not reevaluate runtime input");
+}
+
 void TestImagesSamplersAndAliases() {
   Fixture fixture;
   std::array<Value, 8> image_words;
@@ -2007,6 +2034,7 @@ int main() {
     Run("compute buffer fill", TestComputeBufferFill);
     Run("scalar/vector alias", TestScalarAndVectorBufferAlias);
     Run("runtime unsigned min", TestRuntimeUnsignedMinDescriptor);
+    Run("runtime unsigned multiply high", TestRuntimeUnsignedMultiplyHighDescriptor);
     Run("images and samplers", TestImagesSamplersAndAliases);
     Run("SampleAdjust sampler scratch", TestSampleAdjustSamplerScratch);
     Run("FMASK load specialization", TestFmaskLoadSpecialization);
