@@ -155,7 +155,7 @@ std::optional<AddressIndirectImageAnalysis> AnalyzeAddressIndirectImage(
 	result.address_handle              = address_handle;
 	result.conditional_key_range       = *range;
 	result.descriptor_stride           = stride;
-	result.candidate_count             = range->maximum + 1u;
+	result.candidate_count             = range->maximum - range->minimum + 1u;
 	result.requires_nonempty_wave_mask = false;
 	return result;
 }
