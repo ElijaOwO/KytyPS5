@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <limits>
 #include <optional>
+#include <ranges>
 #include <vector>
 
 namespace Libs::Graphics::ShaderRecompiler::IR {
