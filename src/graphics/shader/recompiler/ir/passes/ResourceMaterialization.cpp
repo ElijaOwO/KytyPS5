@@ -202,6 +202,10 @@ bool MaterializeIndirectImage(const DescriptorSource::IndirectImage& indirect,
                               const DescriptorValue&                 material_value,
                               const DescriptorValue& heap_value, bool r128,
                               const SrtRuntime& runtime, IndirectImage& result) {
+	if (indirect.kind != DescriptorSource::IndirectImageKind::MaterialTable) {
+		return false;
+	}
+
 	ShaderBufferResource material;
 	ShaderBufferResource heap;
 	if (!DecodeBufferDescriptor(material_value, material) ||
@@ -948,10 +952,13 @@ ResourcePlan ExtractResourcePlan(const Program& program) {
 		if (source == nullptr || !source->indirect_image.has_value()) {
 			continue;
 		}
-		MarkCleanFlatSlots(plan, Source(plan, source->indirect_image->material_source),
-		                   plan.clean_flat_slots);
-		MarkCleanFlatSlots(plan, Source(plan, source->indirect_image->heap_source),
-		                   plan.clean_flat_slots);
+		const auto& indirect = *source->indirect_image;
+		if (indirect.kind == DescriptorSource::IndirectImageKind::MaterialTable) {
+			MarkCleanFlatSlots(plan, Source(plan, indirect.material_source), plan.clean_flat_slots);
+			MarkCleanFlatSlots(plan, Source(plan, indirect.heap_source), plan.clean_flat_slots);
+		} else {
+			MarkCleanFlatSlots(plan, Source(plan, indirect.address_source), plan.clean_flat_slots);
+		}
 	}
 	return plan;
 }
