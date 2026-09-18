@@ -592,11 +592,6 @@ private:
 		plan.source = InternSource(image_source);
 		plan.key    = Value(material_read);
 		plan.roots  = image_source.dwords;
-		if (diagnose) {
-			LOGF("BUG0006_ADDRESS_PLAN accept source=%u first=%u count=%u stride=%u\n",
-			     plan.source, indirect_image.first_key, indirect_image.candidate_count,
-			     indirect_image.descriptor_stride);
-		}
 		return true;
 	}
 
@@ -667,6 +662,11 @@ private:
 		plan.source = InternSource(image_source);
 		plan.key    = analysis->key;
 		plan.roots  = image_source.dwords;
+		if (diagnose) {
+			LOGF("BUG0006_ADDRESS_PLAN accept source=%u first=%u count=%u stride=%u\n",
+			     plan.source, indirect_image.first_key, indirect_image.candidate_count,
+			     indirect_image.descriptor_stride);
+		}
 		return true;
 	}
 
