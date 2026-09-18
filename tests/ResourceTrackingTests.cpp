@@ -272,6 +272,10 @@ void TestInvariantIndirectImageMaterialization() {
             fixture->program.descriptor_sources[source]
                 .indirect_image.has_value(),
         "indirect image source was not retained for runtime proof");
+  Check(fixture->program.descriptor_sources[source]
+                .indirect_image->kind ==
+            DescriptorSource::IndirectImageKind::MaterialTable,
+        "existing indirect image planner did not retain material-table semantics");
   const auto image_handle =
       std::ranges::find_if(*fixture->block, [](const Inst &inst) {
         return inst.GetOpcode() == ValueOpcode::GetImageResource;
