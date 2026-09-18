@@ -712,6 +712,19 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 		const auto        opcode        = (packet_header >> 8u) & 0xffu;
 		EXIT_NOT_IMPLEMENTED(remaining_dw > total_dw);
 
+		const auto offset = total_dw - remaining_dw;
+		if (packet_header == 0u && remaining_dw >= 2u && packet[1] == 0u) {
+			static std::atomic<uint32_t> log_count {0};
+			if (log_count.fetch_add(1) < 256u) {
+				LOGF("BUG-0005 TYPE0 zero pair general: offset=0x%05" PRIx32
+				     " total_dw=%" PRIu32 " header=0x%08" PRIx32 " payload=0x%08" PRIx32 "\n",
+				     offset, total_dw, packet_header, packet[1]);
+			}
+			cursor.offset_dw += 2u;
+			execution.m_made_progress = true;
+			continue;
+		}
+
 		if (packet_header == 0x80000000u) {
 			cursor.offset_dw++;
 			execution.m_made_progress = true;
@@ -756,7 +769,6 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 		auto handler = g_cp_op_func[opcode];
 
 		if (handler == nullptr) {
-			const auto offset = total_dw - remaining_dw;
 			LOGF("unknown PM4 packet: data=0x%016" PRIx64 ", num_dw=%" PRIu32
 			     ", offset=0x%05" PRIx32 ", current=0x%016" PRIx64 "\n",
 			     reinterpret_cast<uint64_t>(packet - offset), total_dw, offset,
@@ -764,6 +776,12 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 			const auto  dump_begin = (offset > 8 ? offset - 8 : 0);
 			const auto  dump_end   = std::min<uint32_t>(total_dw, offset + 16);
 			auto* const base       = packet - offset;
+			if (packet_header == 0) {
+				LOGF("BUG-0005 full PM4 buffer: num_dw=%" PRIu32 "\n", total_dw);
+				for (uint32_t i = 0; i < total_dw; i++) {
+					LOGF("\tbug0005[%05" PRIx32 "] = %08" PRIx32 "\n", i, base[i]);
+				}
+			}
 			for (uint32_t i = dump_begin; i < dump_end; i++) {
 				LOGF("\t%05" PRIx32 "%s %08" PRIx32 "\n", i, (i == offset ? ":" : " "), base[i]);
 			}
