@@ -253,6 +253,13 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	ShaderComputeInputInfo input_info {};
 	const bool use_thread_dimensions = (mode & DISPATCH_INITIATOR_USE_THREAD_DIMENSIONS) != 0;
 	input_info.dispatch_thread_dimensions = use_thread_dimensions;
+	static std::atomic<uint32_t> bug0006_dispatch_log_count {0};
+	if (bug0006_dispatch_log_count.fetch_add(1, std::memory_order_relaxed) < 512) {
+		LOGF("BUG0006_DISPATCH submit=%" PRIu64 " shader=0x%016" PRIx64
+		     " groups=%ux%ux%u mode=0x%08" PRIx32 " thread_dimensions=%u\n",
+		     submit_id, cs_regs.cs_regs.data_addr, thread_group_x, thread_group_y, thread_group_z,
+		     mode, use_thread_dimensions ? 1u : 0u);
+	}
 	const auto compute_program =
 	    m_context.GetPipelineCache().GetComputeProgram(cs_regs, sh_regs, input_info);
 	if (use_thread_dimensions) {
