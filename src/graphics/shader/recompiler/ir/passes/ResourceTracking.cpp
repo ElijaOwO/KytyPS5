@@ -592,19 +592,41 @@ private:
 		plan.source = InternSource(image_source);
 		plan.key    = Value(material_read);
 		plan.roots  = image_source.dwords;
+		if (diagnose) {
+			LOGF("BUG0006_ADDRESS_PLAN accept source=%u first=%u count=%u stride=%u\n",
+			     plan.source, indirect_image.first_key, indirect_image.candidate_count,
+			     indirect_image.descriptor_stride);
+		}
 		return true;
 	}
 
 	bool TryMakeAddressIndirectImage(Inst& handle, uint32_t pc, IndirectImagePlan& plan) {
+		const bool diagnose =
+		    m_program.shader_hash == 0x5419ddf79a5127afull && pc == 0x00000d94u;
 		const auto analysis = AnalyzeAddressIndirectImage(m_program, handle);
-		if (!analysis.has_value() || analysis->requires_nonempty_wave_mask ||
-		    analysis->address_handle == nullptr || analysis->candidate_count == 0u) {
+		if (!analysis.has_value()) {
+			if (diagnose) {
+				LOGF("BUG0006_ADDRESS_PLAN reject=analysis\n");
+			}
+			return false;
+		}
+		if (analysis->requires_nonempty_wave_mask || analysis->address_handle == nullptr ||
+		    analysis->candidate_count == 0u) {
+			if (diagnose) {
+				LOGF("BUG0006_ADDRESS_PLAN reject=analysis_state nonempty=%u address=%u candidates=%u\n",
+				     analysis->requires_nonempty_wave_mask ? 1u : 0u,
+				     analysis->address_handle != nullptr ? 1u : 0u,
+				     analysis->candidate_count);
+			}
 			return false;
 		}
 
 		for (uint32_t dword = 0; dword < analysis->reads.size(); dword++) {
 			if (analysis->reads[dword] == nullptr ||
 			    !MemoryIndexBelongsTo(analysis->memory[dword], *analysis->reads[dword])) {
+				if (diagnose) {
+					LOGF("BUG0006_ADDRESS_PLAN reject=memory_belongs dword=%u\n", dword);
+				}
 				return false;
 			}
 			plan.memory[dword] = analysis->memory[dword];
@@ -615,6 +637,9 @@ private:
 		uint32_t         address_source_index = 0;
 		if (!MakeRuntimeAddressSource(*analysis->address_handle, pc, address_source_index,
 		                              address_source)) {
+			if (diagnose) {
+				LOGF("BUG0006_ADDRESS_PLAN reject=address_source\n");
+			}
 			return false;
 		}
 
