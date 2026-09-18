@@ -11,6 +11,12 @@ struct WaterfallReadLaneProof {
 	Value lane_condition;
 	Value low_mask;
 	Value high_mask;
+	Value low_backedge;
+	Value high_backedge;
+	Block* header = nullptr;
+	Block* initial_block = nullptr;
+	Block* backedge_block = nullptr;
+	Block* read_block = nullptr;
 
 	// The recognized selector has an all-zero-mask fallback. The lane condition
 	// is therefore guaranteed only when either current mask contains a bit.
@@ -27,6 +33,13 @@ struct WaterfallReadLaneProof {
 // keys to a semantically safe default.
 std::optional<WaterfallReadLaneProof> AnalyzeWaterfallReadLane(
     const Program& program, Value value);
+
+// Proves that a specific use is reached only on executions where the waterfall
+// mask feeding ReadLane is non-empty. This closes the selector's all-zero-mask
+// fallback without evaluating ReadLane on the host.
+bool ProveWaterfallReadLaneUseGuard(const Program& program,
+                                    const WaterfallReadLaneProof& proof,
+                                    const Inst& use);
 
 } // namespace Libs::Graphics::ShaderRecompiler::IR
 
