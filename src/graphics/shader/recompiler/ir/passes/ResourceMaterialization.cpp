@@ -278,6 +278,67 @@ bool MaterializeIndirectImage(const DescriptorSource::IndirectImage& indirect,
 	return true;
 }
 
+bool MaterializeAddressIndirectImage(const DescriptorSource::IndirectImage& indirect,
+                                     const DescriptorValue& address_value, bool r128,
+                                     const SrtRuntime& runtime, IndirectImage& result) {
+	if (indirect.kind != DescriptorSource::IndirectImageKind::AddressArray ||
+	    address_value.dword_count != 2u || indirect.descriptor_stride != 32u ||
+	    indirect.candidate_count == 0u ||
+	    indirect.candidate_count > MaxIndirectImageProbes ||
+	    indirect.first_key > UINT32_MAX - (indirect.candidate_count - 1u)) {
+		return false;
+	}
+
+	const auto base =
+	    ((static_cast<uint64_t>(address_value.dwords[1]) << 32u) |
+	     address_value.dwords[0]) &
+	    AddressMask;
+
+	IndirectImage next;
+	next.keys.reserve(indirect.candidate_count);
+	next.candidates.reserve(indirect.candidate_count);
+	next.descriptors.reserve(
+	    std::min(static_cast<size_t>(indirect.candidate_count),
+	             static_cast<size_t>(ShaderInfo::MaxImages)));
+
+	for (uint32_t candidate_index = 0; candidate_index < indirect.candidate_count;
+	     candidate_index++) {
+		const auto key = indirect.first_key + candidate_index;
+		next.keys.push_back(key);
+
+		DescriptorValue candidate;
+		candidate.dword_count = 8u;
+		for (uint32_t dword = 0; dword < candidate.dword_count; dword++) {
+			const auto byte_offset =
+			    static_cast<uint64_t>(key) * indirect.descriptor_stride +
+			    dword * sizeof(uint32_t);
+			if (byte_offset > AddressMask - base ||
+			    !ReadSpecializationWord(runtime, base + byte_offset,
+			                            candidate.dwords[dword])) {
+				return false;
+			}
+		}
+		if (NullImageDescriptor(candidate) || !ValidImageDescriptor(candidate, r128)) {
+			candidate.dwords.fill(0);
+		}
+		const auto found = std::ranges::find(next.descriptors, candidate);
+		if (found == next.descriptors.end()) {
+			if (next.descriptors.size() >= ShaderInfo::MaxImages) {
+				return false;
+			}
+			next.descriptors.push_back(candidate);
+			next.candidates.push_back(
+			    static_cast<uint32_t>(next.descriptors.size() - 1u));
+		} else {
+			next.candidates.push_back(
+			    static_cast<uint32_t>(found - next.descriptors.begin()));
+		}
+	}
+
+	result = std::move(next);
+	return true;
+}
+
 } // namespace
 
 static bool MaterializeSnapshot(const ResourcePlan& program, const SrtRuntime& runtime,
@@ -322,19 +383,33 @@ static bool MaterializeSnapshot(const ResourcePlan& program, const SrtRuntime& r
 				next.images[image_index].dword_count = 8u;
 				continue;
 			}
-			const std::array requests {source->indirect_image->material_source,
-			                           source->indirect_image->heap_source};
-			SrtRuntime       clean_runtime = runtime;
-			clean_runtime.read_memory      = runtime.read_specialization_memory;
-			std::vector<DescriptorValue> tables;
-			if (!EvaluateDescriptorSources(program, requests, clean_runtime, tables)) {
+			const auto& indirect = *source->indirect_image;
+			SrtRuntime clean_runtime = runtime;
+			clean_runtime.read_memory = runtime.read_specialization_memory;
+			IndirectImage table;
+			if (indirect.kind == DescriptorSource::IndirectImageKind::MaterialTable) {
+				const std::array requests {indirect.material_source, indirect.heap_source};
+				std::vector<DescriptorValue> tables;
+				if (!EvaluateDescriptorSources(program, requests, clean_runtime, tables) ||
+				    tables.size() != requests.size() ||
+				    !MaterializeIndirectImage(indirect, tables[0], tables[1], image.r128,
+				                              runtime, table)) {
+					return false;
+				}
+			} else if (indirect.kind == DescriptorSource::IndirectImageKind::AddressArray) {
+				const std::array requests {indirect.address_source};
+				std::vector<DescriptorValue> address;
+				if (!EvaluateDescriptorSources(program, requests, clean_runtime, address) ||
+				    address.size() != requests.size() ||
+				    !MaterializeAddressIndirectImage(indirect, address[0], image.r128, runtime,
+				                                     table)) {
+					return false;
+				}
+			} else {
 				return false;
 			}
-			const auto&   material = tables[0];
-			const auto&   heap     = tables[1];
-			IndirectImage table;
-			if (!MaterializeIndirectImage(*source->indirect_image, material, heap, image.r128,
-			                              runtime, table)) {
+			if (table.keys.empty() || table.candidates.empty() || table.descriptors.empty() ||
+			    table.candidates[0] >= table.descriptors.size()) {
 				return false;
 			}
 			next.images[image_index] = table.descriptors[table.candidates[0]];
