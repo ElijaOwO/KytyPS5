@@ -138,6 +138,10 @@ std::optional<AddressIndirectImageAnalysis> AnalyzeAddressIndirectImage(
 		return std::nullopt;
 	}
 
+	if (!ProveWaterfallReadLaneUseGuard(program, *wave, handle)) {
+		return std::nullopt;
+	}
+
 	const auto range = AnalyzeResourceKeyRange(
 	    key, {.condition = wave->lane_condition,
 	          .selected_lane_satisfies_condition = true});
@@ -145,14 +149,14 @@ std::optional<AddressIndirectImageAnalysis> AnalyzeAddressIndirectImage(
 		return std::nullopt;
 	}
 
-	result.key                       = key;
-	result.byte_offset               = byte_offset;
-	result.lane_condition            = wave->lane_condition;
-	result.address_handle            = address_handle;
-	result.conditional_key_range     = *range;
-	result.descriptor_stride         = stride;
-	result.candidate_count           = range->maximum + 1u;
-	result.requires_nonempty_wave_mask = wave->may_use_empty_mask_fallback;
+	result.key                         = key;
+	result.byte_offset                 = byte_offset;
+	result.lane_condition              = wave->lane_condition;
+	result.address_handle              = address_handle;
+	result.conditional_key_range       = *range;
+	result.descriptor_stride           = stride;
+	result.candidate_count             = range->maximum + 1u;
+	result.requires_nonempty_wave_mask = false;
 	return result;
 }
 
