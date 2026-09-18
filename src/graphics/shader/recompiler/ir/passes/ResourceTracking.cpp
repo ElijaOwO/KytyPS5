@@ -620,6 +620,10 @@ private:
 
 		DescriptorSource image_source;
 		image_source.dword_count = 8u;
+		image_source.dwords[0]   = address_source.dwords[0];
+		image_source.dwords[1]   = address_source.dwords[1];
+		image_source.dwords[2]   = Value(0u);
+		image_source.dwords[3]   = Value(0u);
 		image_source.dwords[4]   = address_source.dwords[0];
 		image_source.dwords[5]   = address_source.dwords[1];
 		image_source.dwords[6]   = Value(0u);
