@@ -893,9 +893,19 @@ ShaderParams PrepareProgram(const HW::ComputeShaderInfo& regs, const HW::ShaderR
                             ShaderComputeInputInfo& info) {
 	const auto data = ShaderGetMappedData(regs.cs_regs.data_addr, "ShaderGetInputInfoCS():");
 	ShaderGetStaticInputInfoCS(regs, sh, data, info);
-	return GetShaderParams(
+	auto params = GetShaderParams(
 	    regs.cs_regs.data_addr, "ShaderRecompiler CS", GetDeclaredShaderHash(regs.cs_regs.data_addr),
 	    std::span<const uint32_t>(regs.cs_user_sgpr.value, regs.cs_regs.user_sgpr), data);
+	if (params.hash == 0x0ee8d3cb56f5a719ull) {
+		LOGF("BUG0006_COMPUTE_INPUT hash=0x%016" PRIx64 " shader=0x%016" PRIx64
+		     " local=%ux%ux%u group_id=%u,%u,%u workgroup_register=%u thread_ids=%u "
+		     "tg_size_en=%u wave=%u user_sgpr=%u\n",
+		     params.hash, regs.cs_regs.data_addr, info.threads_num[0], info.threads_num[1],
+		     info.threads_num[2], info.group_id[0] ? 1u : 0u, info.group_id[1] ? 1u : 0u,
+		     info.group_id[2] ? 1u : 0u, info.workgroup_register, info.thread_ids_num,
+		     info.tg_size_en ? 1u : 0u, info.wave_size, regs.cs_regs.user_sgpr);
+	}
+	return params;
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
