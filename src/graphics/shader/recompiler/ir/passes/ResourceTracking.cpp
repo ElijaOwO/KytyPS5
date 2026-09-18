@@ -564,8 +564,14 @@ private:
 		          image_source.dwords.begin());
 		std::copy(heap_source.dwords.begin(), heap_source.dwords.begin() + 4u,
 		          image_source.dwords.begin() + 4u);
-		image_source.indirect_image = DescriptorSource::IndirectImage {
-		    material_source_index, heap_source_index, selector_stride, selector_offset, 0u};
+		DescriptorSource::IndirectImage indirect_image;
+		indirect_image.material_source  = material_source_index;
+		indirect_image.heap_source      = heap_source_index;
+		indirect_image.selector_stride  = selector_stride;
+		indirect_image.selector_offset  = selector_offset;
+		indirect_image.key_arg          = 0u;
+		indirect_image.kind = DescriptorSource::IndirectImageKind::MaterialTable;
+		image_source.indirect_image = indirect_image;
 
 		plan.handle = &handle;
 		plan.source = InternSource(image_source);
