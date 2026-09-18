@@ -467,7 +467,8 @@ struct DescriptorSource {
 		IndirectImageKind kind             = IndirectImageKind::MaterialTable;
 		uint32_t          address_source   = 0;
 		uint32_t          descriptor_stride = 0;
-		uint32_t          candidate_count  = 0;
+		uint32_t          first_key         = 0;
+		uint32_t          candidate_count   = 0;
 
 		bool operator==(const IndirectImage& other) const = default;
 	};
