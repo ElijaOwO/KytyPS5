@@ -200,6 +200,34 @@ void TestNestedSrtWalk() {
         "nested typed SRT reads were not evaluated in dependency order");
 }
 
+void TestSignedMinRuntime() {
+  Fixture fixture;
+  fixture.program.user_data_count = 1;
+  const auto user = fixture.Emit(ValueOpcode::GetUserData,
+                                 {Value(static_cast<ScalarReg>(2))});
+  const auto sum = fixture.Emit(ValueOpcode::IAdd32, {user, Value(3u)});
+  const auto minimum = fixture.Emit(ValueOpcode::SMin32, {sum, Value(7u)});
+  fixture.Plan();
+
+  Check(ValidateRuntimeValue(fixture.program, minimum),
+        "signed minimum runtime expression was rejected");
+
+  fixture.program.descriptor_sources.push_back(
+      {.dwords = {minimum}, .dword_count = 1});
+
+  std::array<uint32_t, 1> user_data{10u};
+  SrtRuntime runtime{.user_data = user_data};
+  DescriptorValue result;
+  Check(EvaluateDescriptorSource(fixture.program, 0, runtime, result) &&
+            result.dwords[0] == 7u,
+        "signed minimum positive runtime evaluation is incorrect");
+
+  user_data[0] = 0xfffffff0u;
+  Check(EvaluateDescriptorSource(fixture.program, 0, runtime, result) &&
+            result.dwords[0] == 0xfffffff3u,
+        "signed minimum negative runtime evaluation is incorrect");
+}
+
 void TestShaderBaseAndUserData() {
   Fixture fixture;
   const auto base = fixture.Emit(ValueOpcode::GetShaderBase);
@@ -591,6 +619,7 @@ int main() {
     TestScalarMemoryDomainMismatchFails();
     TestDynamicReadRemainsTyped();
     TestNestedSrtWalk();
+    TestSignedMinRuntime();
     TestShaderBaseAndUserData();
     TestCarryAndBitFields();
     TestInvariantAndDivergentPhi();
