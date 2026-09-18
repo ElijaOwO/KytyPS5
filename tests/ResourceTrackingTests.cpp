@@ -1064,10 +1064,12 @@ void TestAddressIndirectImageAnalysis() {
       .kind = CFG::TerminatorKind::Branch, .true_block = 1u};
   fixture.program.block_info[1].terminator = {
       .kind = CFG::TerminatorKind::Branch, .true_block = 2u};
-  fixture.program.block_info[2].condition = use_guard;
+  const auto skip_use =
+      fixture.Emit(ValueOpcode::LogicalNot, {use_guard}, 0, selector);
+  fixture.program.block_info[2].condition = skip_use;
   fixture.program.block_info[2].terminator = {
       .kind = CFG::TerminatorKind::ConditionalBranch,
-      .true_block = 3u, .false_block = 4u};
+      .true_block = 4u, .false_block = 3u};
   fixture.program.block_info[3].terminator = {
       .kind = CFG::TerminatorKind::Branch, .true_block = 4u};
   fixture.program.block_info[4].condition = remaining;
