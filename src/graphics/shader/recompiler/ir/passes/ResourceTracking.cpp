@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdio>
 #include <fmt/format.h>
 #include <span>
 #include <utility>
@@ -596,22 +597,29 @@ private:
 	}
 
 	bool TryMakeAddressIndirectImage(Inst& handle, uint32_t pc, IndirectImagePlan& plan) {
-		const bool diagnose =
-		    m_program.shader_hash == 0x5419ddf79a5127afull && pc == 0x00000d94u;
+		const bool diagnose = m_program.shader_hash == 0x5419ddf79a5127afull;
+		if (diagnose) {
+			std::fprintf(stderr, "BUG0006_ADDRESS_PLAN attempt use_pc=0x%08x handle_opcode=%s\n",
+			             pc, ValueOpcodeName(handle.GetOpcode()).data());
+			std::fflush(stderr);
+		}
 		const auto analysis = AnalyzeAddressIndirectImage(m_program, handle);
 		if (!analysis.has_value()) {
 			if (diagnose) {
-				LOGF("BUG0006_ADDRESS_PLAN reject=analysis\n");
+				std::fprintf(stderr, "BUG0006_ADDRESS_PLAN reject=analysis use_pc=0x%08x\n", pc);
+				std::fflush(stderr);
 			}
 			return false;
 		}
 		if (analysis->requires_nonempty_wave_mask || analysis->address_handle == nullptr ||
 		    analysis->candidate_count == 0u) {
 			if (diagnose) {
-				LOGF("BUG0006_ADDRESS_PLAN reject=analysis_state nonempty=%u address=%u candidates=%u\n",
-				     analysis->requires_nonempty_wave_mask ? 1u : 0u,
-				     analysis->address_handle != nullptr ? 1u : 0u,
-				     analysis->candidate_count);
+				std::fprintf(stderr,
+				             "BUG0006_ADDRESS_PLAN reject=analysis_state use_pc=0x%08x nonempty=%u address=%u candidates=%u\n",
+				             pc, analysis->requires_nonempty_wave_mask ? 1u : 0u,
+				             analysis->address_handle != nullptr ? 1u : 0u,
+				             analysis->candidate_count);
+				std::fflush(stderr);
 			}
 			return false;
 		}
@@ -620,7 +628,10 @@ private:
 			if (analysis->reads[dword] == nullptr ||
 			    !MemoryIndexBelongsTo(analysis->memory[dword], *analysis->reads[dword])) {
 				if (diagnose) {
-					LOGF("BUG0006_ADDRESS_PLAN reject=memory_belongs dword=%u\n", dword);
+					std::fprintf(stderr,
+					             "BUG0006_ADDRESS_PLAN reject=memory_belongs use_pc=0x%08x dword=%u\n",
+					             pc, dword);
+					std::fflush(stderr);
 				}
 				return false;
 			}
@@ -633,7 +644,9 @@ private:
 		if (!MakeRuntimeAddressSource(*analysis->address_handle, pc, address_source_index,
 		                              address_source)) {
 			if (diagnose) {
-				LOGF("BUG0006_ADDRESS_PLAN reject=address_source\n");
+				std::fprintf(stderr,
+				             "BUG0006_ADDRESS_PLAN reject=address_source use_pc=0x%08x\n", pc);
+				std::fflush(stderr);
 			}
 			return false;
 		}
@@ -663,9 +676,11 @@ private:
 		plan.key    = analysis->key;
 		plan.roots  = image_source.dwords;
 		if (diagnose) {
-			LOGF("BUG0006_ADDRESS_PLAN accept source=%u first=%u count=%u stride=%u\n",
-			     plan.source, indirect_image.first_key, indirect_image.candidate_count,
-			     indirect_image.descriptor_stride);
+			std::fprintf(stderr,
+			             "BUG0006_ADDRESS_PLAN accept use_pc=0x%08x source=%u first=%u count=%u stride=%u\n",
+			             pc, plan.source, indirect_image.first_key,
+			             indirect_image.candidate_count, indirect_image.descriptor_stride);
+			std::fflush(stderr);
 		}
 		return true;
 	}
