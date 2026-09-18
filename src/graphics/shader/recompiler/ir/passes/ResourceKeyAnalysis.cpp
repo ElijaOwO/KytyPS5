@@ -292,16 +292,19 @@ std::optional<F32Range> AnalyzeF32(Value value, const AnalysisContext& context,
 						}
 					}
 				}
-				range.has_numeric = true;
-				range.minimum = values[0];
-				range.maximum = values[0];
 				for (const auto candidate: values) {
 					if (std::isnan(candidate)) {
 						range.may_nan = true;
 						continue;
 					}
-					range.minimum = std::min(range.minimum, candidate);
-					range.maximum = std::max(range.maximum, candidate);
+					if (!range.has_numeric) {
+						range.has_numeric = true;
+						range.minimum     = candidate;
+						range.maximum     = candidate;
+					} else {
+						range.minimum = std::min(range.minimum, candidate);
+						range.maximum = std::max(range.maximum, candidate);
+					}
 				}
 			}
 			result = range;
@@ -530,10 +533,10 @@ std::optional<U32Range> AnalyzeU32(Value value, const AnalysisContext& context,
 			};
 		}
 		case ValueOpcode::ConvertS32F32: {
+			constexpr float MaxExactlyConvertibleS32 = 2147483520.0f;
 			const auto source = AnalyzeF32(inst->Arg(0), context, depth + 1u);
 			if (!source.has_value() || !source->has_numeric || source->may_nan ||
-			    source->minimum < 0.0f ||
-			    source->maximum > static_cast<float>(INT32_MAX)) {
+			    source->minimum < 0.0f || source->maximum > MaxExactlyConvertibleS32) {
 				return std::nullopt;
 			}
 			return U32Range {
