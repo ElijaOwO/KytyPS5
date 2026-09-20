@@ -31676,12 +31676,6 @@ int main(int argc, char **argv) {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
   EnsureConfigInitialized();
   CheckLeastRecentlyUsedCacheOrdering();
-  if (argc == 2 && std::strcmp(argv[1], "--s-bitcmp-b64-only") == 0) {
-    VulkanHarness vulkan;
-    RunCase(&vulkan, ScalarBitcmpB64DynamicOperands());
-    RunCase(&vulkan, ScalarBitcmpB64IntegerConstants());
-    return 0;
-  }
   if (argc == 2 && std::strcmp(argv[1], "--buffer-snorm-store-only") == 0) {
     VulkanHarness vulkan;
     RunCase(&vulkan, BufferStoreFormatXyzwSnorm16CapturedSkinningVectors());
