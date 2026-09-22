@@ -82,6 +82,24 @@ void TestAbsentQuery(HttpUriParse parse) {
   }
 }
 
+void TestEmptyUri(HttpUriParse parse) {
+  constexpr char url[] = "";
+  size_t required = 0;
+  CHECK(parse(nullptr, url, nullptr, &required, 0) == 0);
+  CHECK(required == 4);
+
+  std::array<char, 4> pool{};
+  SceHttpUriElement out{};
+  size_t parsed_required = 0;
+  CHECK(parse(&out, url, pool.data(), &parsed_required, required) == 0);
+  CHECK(parsed_required == required);
+  CHECK(out.query != nullptr);
+  CHECK(PointsIntoPool(out.query, pool, required));
+  if (out.query != nullptr) {
+    CHECK(out.query[0] == '\0');
+  }
+}
+
 void TestPresentQuery(HttpUriParse parse) {
   constexpr char url[] = "http://example.com/path?foo=bar";
   size_t required = 0;
@@ -107,6 +125,7 @@ int main() {
     return 1;
   }
   TestAbsentQuery(parse);
+  TestEmptyUri(parse);
   TestPresentQuery(parse);
   return failures == 0 ? 0 : 1;
 }
