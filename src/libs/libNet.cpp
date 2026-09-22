@@ -460,6 +460,9 @@ static int KYTY_SYSV_ABI HttpUriParse(SceHttpUriElement* out, const char* src_ur
 			needed += part.len + 1;
 		}
 	}
+	if (query.begin == nullptr) {
+		needed += 1;
+	}
 
 	if (require != nullptr) {
 		*require = needed;
@@ -482,7 +485,12 @@ static int KYTY_SYSV_ABI HttpUriParse(SceHttpUriElement* out, const char* src_ur
 		out->password = CopyUriPart(dst, password);
 		out->hostname = CopyUriPart(dst, hostname);
 		out->path     = CopyUriPart(dst, path);
-		out->query    = CopyUriPart(dst, query);
+		if (query.begin == nullptr) {
+			out->query    = dst++;
+			out->query[0] = '\0';
+		} else {
+			out->query = CopyUriPart(dst, query);
+		}
 		out->fragment = CopyUriPart(dst, fragment);
 	}
 
